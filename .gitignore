@@ -1,0 +1,11 @@
+# .gitignore
+gemma_activity.log
+gemini_activity.log
+gemma_manifest.json
+*.wav
+junk
+old.*
+*.works
+*.broke
+test_*
+hardware_probe.py
