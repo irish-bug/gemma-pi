@@ -1,0 +1,16 @@
+{
+    "identity": {
+        "node_id": "GEMMA-V1",
+        "voice_profile": "Aoede"
+    },
+    "aliases": {
+        "WORK_PLACE": "Reference to your employer",
+        "PRIMARY_PROJECT": "Reference to your main build",
+        "THE_BOSS": "Reference to your partner/spouse"
+    },
+    "constants": {
+        "HOME_BASE": "City, State",
+        "THERMAL_UNIT": "Fahrenheit/Celsius",
+        "HARDWARE_CONTEXT": "Device/Microphone"
+    }
+}
