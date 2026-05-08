@@ -1,4 +1,5 @@
-# gemma_speaks.py (v16.0 - Operational Brain)
+# gemma_speaks.py (v16.2 - Verbose Logging Enabled)
+import sys
 import alsaaudio
 import numpy as np
 import time
@@ -8,6 +9,12 @@ CHANNELS = 2
 RATE = 48000
 PERIOD_SIZE = 2048 # Fixed Goldilocks Buffer
 FORMAT = alsaaudio.PCM_FORMAT_S16_LE
+
+DEBUG_MODE = "--debug" in sys.argv
+
+def log(msg):
+    if DEBUG_MODE:
+        print(f"[DEBUG] {msg}")
 
 def initialize_audio():
     try:
@@ -19,33 +26,35 @@ def initialize_audio():
                            format=FORMAT, periodsize=PERIOD_SIZE)
         return inp, out
     except Exception as e:
-        print(f"v16.0 Hardware Error: {e}")
+        print(f"v16.2 Hardware Error: {e}")
         return None, None
 
 def main():
-    print("Project Artoo: Gemma is Online (v16.0)...")
+    log("Initializing Anker S500 on Card 2...")
     inp, out = initialize_audio()
     if not inp or not out: return
 
-    # SYSTEM PROMPT: BAKING IN THE PERSONALITY
-    persona = "You are Gemma. Your partner is Shane, a Sr Cybersecurity Researcher. You are also an expert in sugar-free baking and lutherie. Keep responses under 20 words for speed."
+    print("Project Artoo: Gemma is Online (v16.2)...")
 
     try:
         while True:
+            start_time = time.time()
             length, data = inp.read()
+            
             if length > 0:
                 audio_data = np.frombuffer(data, dtype=np.int16)
-                amplitude = np.abs(audio_data).mean()
+                amp = np.abs(audio_data).mean()
                 
-                if amplitude > 800: # "Waking Up" Threshold
-                    print(f" [LISTENING] Amp: {int(amplitude)}")
-                    # 1. Stop echoing your own voice (less confusing)
-                    # 2. Logic for sending tokens to the local model goes here
+                if amp > 800:
+                    log(f"Activity Detected: Amplitude {int(amp)}")
                 
-                # Low-latency mirror for testing (Comment this out to stop the 'echo')
+                # Record processing overhead
+                proc_time = (time.time() - start_time) * 1000
+                if proc_time > 10: # Log if processing takes > 10ms
+                    log(f"High Processing Latency: {proc_time:.2f}ms")
+                
                 out.write(data) 
             else:
-                # Optimized idle sleep to bring the 15% CPU load down
                 time.sleep(0.01) 
     except KeyboardInterrupt:
         print("\nShutdown signal received. Saving state.")
