@@ -16,6 +16,26 @@ def log(msg):
     if DEBUG_MODE:
         print(f"[DEBUG] {msg}")
 
+def play_emotion(emotion, user_text=""):
+    """v16.3 Gated Audio Logic"""
+    import subprocess
+    import os
+    
+    # Survival Tones: Always active
+    survival_tones = ["error", "worried", "1-screaming", "overwhelmed"]
+    
+    # Interaction Tones: Only if Artoo is addressed
+    interaction_tones = ["ack", "chat", "acknowledged", "excited"]
+    
+    is_survival = emotion in survival_tones
+    is_addressed = any(name in user_text.lower() for name in ["artoo", "sysadmin"])
+    
+    if is_survival or is_addressed:
+        path = f"/home/shane/google-labs/audio/{emotion}.wav"
+        if os.path.exists(path):
+            # Target Card 2 (S500)
+            subprocess.Popen(["aplay", "-q", "-D", "plughw:CARD=S500,DEV=0", path])
+
 def initialize_audio():
     try:
         inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, alsaaudio.PCM_NONBLOCK, 
