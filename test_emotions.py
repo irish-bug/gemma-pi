@@ -18,7 +18,7 @@ def test_trigger_latency():
     print("[*] Testing non-blocking aplay trigger...")
     start = time.time()
     # Triggering the longest file (screaming) to ensure it doesn't block
-    play_emotion("1-screaming", "artoo sysadmin")
+    play_emotion("confirm_long", "artoo sysadmin")
     end = time.time()
     latency = (end - start) * 1000
     print(f"[*] Trigger Latency: {latency:.2f}ms")
