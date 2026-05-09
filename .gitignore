@@ -14,3 +14,12 @@ hardware_probe.py
 workspace-ext/
 node_modules/
 __pycache__/
+Python-3.11.15/
+gemma_stable_env/
+__pycache__/
+*.pyc
+Python-3.11.15/
+gemma_stable_env/
+artoo_ops.log
+*.log
+__pycache__/
