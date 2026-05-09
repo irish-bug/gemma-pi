@@ -9,3 +9,8 @@ old.*
 *.broke
 test_*
 hardware_probe.py
+!test_gemma.py
+!test_emotions.py
+workspace-ext/
+node_modules/
+__pycache__/
