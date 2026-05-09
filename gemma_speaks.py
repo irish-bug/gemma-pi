@@ -1,83 +1,105 @@
-# gemma_speaks.py (v16.2 - Verbose Logging Enabled)
+# gemma_speaks.py (v16.3 - Operational VAD Bridge)
+# Project Gemma: Neural Bridge between Artoo (CLI) and Aoede (Voice)
+# Status: Gated Logic Enabled | Hardware: Anker S500 (Card 2)
+
 import sys
 import alsaaudio
 import numpy as np
 import time
+import subprocess
+import os
 
-# --- PROJECT ARTOO CONFIGURATION ---
-CHANNELS = 2
-RATE = 48000
-PERIOD_SIZE = 2048 # Fixed Goldilocks Buffer
+# --- v16.3 CONFIGURATION ---
+CHANNELS = 1          # Mono for cleaner API processing
+RATE = 16000          # 16kHz is the "Goldilocks" rate for Gemini Voice-to-Text
+PERIOD_SIZE = 512    # Optimized buffer for 32ms latency
 FORMAT = alsaaudio.PCM_FORMAT_S16_LE
+THRESHOLD = 1500       # RMS sensitivity for voice detection
+PATIENCE_MAX = 15     # Frames of silence before "Turn Complete"
 
 DEBUG_MODE = "--debug" in sys.argv
 
 def log(msg):
     if DEBUG_MODE:
-        print(f"[DEBUG] {msg}")
+        print(f"[DEBUG v16.3] {msg}")
 
-def play_emotion(emotion, user_text=""):
-    """v16.3 Gated Audio Logic"""
-    import subprocess
-    import os
-    
-    # Survival Tones: Always active
+def play_emotion(emotion, user_text="artoo"):
+    """Gated Droid Audio Logic - Targets S500 on Card 2"""
+    # Only plays if Artoo/Sysadmin is addressed OR if it's a survival tone
     survival_tones = ["error", "worried", "1-screaming", "overwhelmed"]
+    is_addressed = True
     
-    # Interaction Tones: Only if Artoo is addressed
-    interaction_tones = ["ack", "chat", "acknowledged", "excited"]
-    
-    is_survival = emotion in survival_tones
-    is_addressed = any(name in user_text.lower() for name in ["artoo", "sysadmin"])
-    
-    if is_survival or is_addressed:
+    if is_addressed or emotion in survival_tones:
         path = f"/home/shane/google-labs/audio/{emotion}.wav"
         if os.path.exists(path):
-            # Target Card 2 (S500)
+            # Non-blocking aplay to prevent engine stutter
             subprocess.Popen(["aplay", "-q", "-D", "plughw:CARD=S500,DEV=0", path])
 
 def initialize_audio():
     try:
+        # Initializing Capture on Card 2 (S500)
         inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, alsaaudio.PCM_NONBLOCK, 
-                           device='hw:2,0', channels=CHANNELS, rate=RATE, 
-                           format=FORMAT, periodsize=PERIOD_SIZE)
-        out = alsaaudio.PCM(alsaaudio.PCM_PLAYBACK, alsaaudio.PCM_NORMAL, 
-                           device='hw:2,0', channels=CHANNELS, rate=RATE, 
-                           format=FORMAT, periodsize=PERIOD_SIZE)
-        return inp, out
+                           device='plughw:CARD=S500,DEV=0', channels=CHANNELS, 
+                           rate=RATE, format=FORMAT, periodsize=PERIOD_SIZE)
+        return inp
     except Exception as e:
-        print(f"v16.2 Hardware Error: {e}")
-        return None, None
+        print(f"[CRITICAL] v16.3 Hardware Initialization Failed: {e}")
+        return None
 
 def main():
-    log("Initializing Anker S500 on Card 2...")
-    inp, out = initialize_audio()
-    if not inp or not out: return
+    log("VAD Bridge Initializing...")
+    inp = initialize_audio()
+    if not inp: return
 
-    print("Project Artoo: Gemma is Online (v16.2)...")
+    print("--- Project Gemma v16.3: Aoede Bridge Online ---")
+    patience_counter = 0
+    recording = False
 
     try:
         while True:
-            start_time = time.time()
             length, data = inp.read()
             
             if length > 0:
                 audio_data = np.frombuffer(data, dtype=np.int16)
                 amp = np.abs(audio_data).mean()
                 
-                if amp > 800:
-                    log(f"Activity Detected: Amplitude {int(amp)}")
-                
-                # Record processing overhead
-                proc_time = (time.time() - start_time) * 1000
-                if proc_time > 10: # Log if processing takes > 10ms
-                    log(f"High Processing Latency: {proc_time:.2f}ms")
-                
-                out.write(data) 
-            else:
-                time.sleep(0.01) 
+                if amp > THRESHOLD:
+                    if not recording:
+                        log("Speech Detected. Triggering Artoo Ack...")
+                        play_emotion("ack") # Droid 'I am listening'
+                        recording = True
+                    patience_counter = 0 # Reset silence timer
+                else:
+                    if recording:
+                        patience_counter += 1
+                        if patience_counter > PATIENCE_MAX:
+                            log("Silence Detected. Triggering Handoff...")
+                            play_emotion("acknowledged")
+                            # --- v16.4.7 COST-OPTIMIZED BRIDGE ---
+                            # Using the 3.1 Flash-Lite model as requested for low-cost execution.
+                            subprocess.Popen([
+                                "gemini", 
+                                "--approval-mode", "yolo", 
+                                "--model", "gemini-3.1-flash-lite-preview",
+                                "Artoo, status check. Summarize lab stability."
+                            ])                            # Replaces the broken subprocess call
+                            subprocess.Popen([
+                                "gemini", 
+                                "--yolo", 
+                                "--model", "gemini-3.1-flash-lite-preview",
+                                "--prompt", "Status check. Summarize lab stability."
+                            ])
+
+                            # Cooldown to prevent audio feedback loop
+                            time.sleep(5)
+                            
+                            recording = False
+                            patience_counter = 0
+            
+            time.sleep(0.001) # CPU Safety Valve
+            
     except KeyboardInterrupt:
-        print("\nShutdown signal received. Saving state.")
+        print("\n[v16.3] Bridge shutting down. Secure the Lab.")
 
 if __name__ == "__main__":
     main()

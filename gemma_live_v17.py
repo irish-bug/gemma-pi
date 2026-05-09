@@ -1,0 +1,132 @@
+# --- v17.1.9 Gemma Live: Robust Watchdog ---
+# Change Message: Fixed timeout logic using task cancellation. 
+# Handled 1008 GoAway errors to prevent script crashes.
+
+import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
+import numpy as np
+import sounddevice as sd
+from openwakeword.model import Model
+
+# --- 1. CONFIG ---
+API_KEY = os.environ.get("GEMINI_API_KEY")
+MODEL = "gemini-3.1-flash-live-preview"
+VOICE = "Aoede"
+
+HW_FS, API_IN_FS, API_OUT_FS = 48000, 16000, 24000
+IN_RATIO, OUT_RATIO = 3, 2
+MIC_BOOST, OUT_BOOST = 8.0, 1.2 
+
+input_queue = asyncio.Queue()
+output_buffer = []
+buffer_lock = threading.Lock()
+is_gemma_outputting_sound = False 
+last_activity_time = time.time()
+
+oww_model = Model(wakeword_models=["hey_mycroft"], inference_framework="onnx")
+
+# --- 2. LOCAL TOOLS ---
+def local_artoo_executor(command):
+    try:
+        result = subprocess.check_output(["gemini", "--approval-mode", "yolo", command], text=True)
+        return result
+    except Exception as e:
+        return f"Error contacting Artoo: {str(e)}"
+
+# --- 3. AUDIO HANDLERS ---
+def mic_callback(indata, frames, time, status):
+    if not is_gemma_outputting_sound:
+        loop.call_soon_threadsafe(input_queue.put_nowait, indata.copy())
+
+def spk_callback(outdata, frames, time, status):
+    global output_buffer, is_gemma_outputting_sound
+    with buffer_lock:
+        if len(output_buffer) >= frames:
+            chunk = np.array(output_buffer[:frames], dtype=np.float32)
+            outdata[:, 0] = np.clip(chunk * OUT_BOOST, -1.0, 1.0)
+            output_buffer = output_buffer[frames:]
+            is_gemma_outputting_sound = np.max(np.abs(chunk)) > 0.01
+        else:
+            outdata.fill(0); is_gemma_outputting_sound = False 
+
+# --- 4. THE LIVE BRAIN ---
+async def start_gemini_session():
+    global last_activity_time
+    last_activity_time = time.time()
+    uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
+    
+    try:
+        async with websockets.connect(uri) as ws:
+            setup = {
+                "setup": {
+                    "model": f"models/{MODEL}",
+                    "generation_config": {
+                        "response_modalities": ["AUDIO"],
+                        "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": VOICE}}}
+                    },
+                    "system_instruction": {"parts": [{"text": "Your name is Gemma. You are a witty AI. You have a local assistant named Artoo. Use the run_artoo_cmd tool for lab tasks. Be concise."}]},
+                    "tools": [{"function_declarations": [{"name": "run_artoo_cmd", "description": "Run lab command.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}]}]
+                }
+            }
+            await ws.send(json.dumps(setup))
+            await ws.recv() 
+            print("\n[LIVE] Session Active.")
+
+            async def send_loop():
+                global last_activity_time
+                while True:
+                    indata = await input_queue.get()
+                    downsampled = indata[::IN_RATIO]
+                    audio_int16 = (np.clip(downsampled * MIC_BOOST, -1.0, 1.0) * 32767).astype(np.int16)
+                    await ws.send(json.dumps({"realtime_input": {"audio": {"data": base64.b64encode(audio_int16.tobytes()).decode(), "mime_type": "audio/L16;rate=16000"}}}))
+                    
+                    if time.time() - last_activity_time > 60:
+                        print("\n[!] Watchdog: Reverting to local wake-word...")
+                        return # Exit the loop
+
+            async def receive_loop():
+                global last_activity_time
+                async for message in ws:
+                    msg = json.loads(message)
+                    parts = msg.get("serverContent", {}).get("modelTurn", {}).get("parts", [])
+                    for part in parts:
+                        last_activity_time = time.time() # Reset on any server activity
+                        if "toolCall" in part:
+                            fc = part["toolCall"]["functionCalls"][0]
+                            res = local_artoo_executor(fc["args"]["command"])
+                            await ws.send(json.dumps({"tool_response": {"function_responses": [{"name": "run_artoo_cmd", "response": {"result": res}}]}}))
+                        if "inlineData" in part:
+                            raw = base64.b64decode(part["inlineData"]["data"])
+                            audio_fp32 = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
+                            with buffer_lock: output_buffer.extend(np.repeat(audio_fp32, OUT_RATIO).tolist())
+                        if "text" in part: print(f"\n[Gemma]: {part['text']}")
+
+            # Run loops until one of them finishes (like the timeout)
+            done, pending = await asyncio.wait(
+                [asyncio.create_task(send_loop()), asyncio.create_task(receive_loop())],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in pending: task.cancel() # Kill the other loop cleanly
+
+    except Exception as e:
+        print(f"\n[!] Session Closed: {e}")
+
+async def main():
+    global loop
+    loop = asyncio.get_running_loop()
+    try:
+        with sd.InputStream(device="Anker PowerConf S500", channels=1, samplerate=HW_FS, callback=mic_callback, blocksize=3840), \
+             sd.OutputStream(device="Anker PowerConf S500", channels=1, samplerate=HW_FS, callback=spk_callback, blocksize=1024):
+            print("[*] HOLMES IV Listening... ('Hey Mycroft')")
+            while True:
+                indata = await input_queue.get()
+                prediction = oww_model.predict((indata[::IN_RATIO] * 32767).astype(np.int16).flatten())
+                if prediction["hey_mycroft"] > 0.5:
+                    print("\n[!] Wake Word Detected!")
+                    await start_gemini_session()
+                    # Clear queue to prevent "ghost audio" re-triggering
+                    while not input_queue.empty(): input_queue.get_nowait()
+    except Exception as e: print(f"[!] Stream failure: {e}")
+
+if __name__ == "__main__":
+    try: asyncio.run(main())
+    except KeyboardInterrupt: sys.exit(0)
