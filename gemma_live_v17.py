@@ -1,6 +1,9 @@
-# --- v17.1.9 Gemma Live: Robust Watchdog ---
-# Change Message: Fixed timeout logic using task cancellation. 
-# Handled 1008 GoAway errors to prevent script crashes.
+# --- v17.2.0 Gemma Live: Robust Watchdog with Integrated Spotify Controls ---
+# Change Message (v17.2.0): 
+# - Intercepts music/playback queries natively inside local_artoo_executor.
+# - Routes 'play' and 'album' instructions directly to the gemma_stable_env spotify_control.py script.
+# - Updated Gemini Live System Instructions and Tool Declarations to explicitly handle Spotify routing.
+# - Retained the v17.1.9 WebSocket timeout/GoAway stabilization and task cancellation fixes.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -26,11 +29,30 @@ oww_model = Model(wakeword_models=["hey_mycroft"], inference_framework="onnx")
 
 # --- 2. LOCAL TOOLS ---
 def local_artoo_executor(command):
-    try:
-        result = subprocess.check_output(["gemini", "--approval-mode", "yolo", command], text=True)
-        return result
-    except Exception as e:
-        return f"Error contacting Artoo: {str(e)}"
+    cmd_lower = command.lower()
+    
+    # NEW (v17.2.0): Direct routing for local music/album playback 
+    if "album" in cmd_lower or "play" in cmd_lower:
+        try:
+            script_path = os.path.expanduser("~/google-labs/spotify_control.py")
+            # Strip away any redundant verbal wake-words passed down by the LLM
+            clean_cmd = command.lower().replace("tell artoo", "").strip()
+            
+            print(f"⚡ Artoo intercepting Spotify command: '{clean_cmd}'")
+            result = subprocess.check_output([script_path, clean_cmd], text=True, stderr=subprocess.STDOUT)
+            return f"Artoo successfully handled the music request. Execution Log: {result.strip()}"
+        except subprocess.CalledProcessError as e:
+            return f"Artoo encountered a runtime issue with Spotify: {e.output.strip()}"
+        except Exception as e:
+            return f"Error executing Spotify command: {str(e)}"
+            
+    # Default fallback for regular lab infrastructure/system commands
+    else:
+        try:
+            result = subprocess.check_output(["gemini", "--approval-mode", "yolo", command], text=True)
+            return result
+        except Exception as e:
+            return f"Error contacting Artoo: {str(e)}"
 
 # --- 3. AUDIO HANDLERS ---
 def mic_callback(indata, frames, time, status):
@@ -63,8 +85,26 @@ async def start_gemini_session():
                         "response_modalities": ["AUDIO"],
                         "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": VOICE}}}
                     },
-                    "system_instruction": {"parts": [{"text": "Your name is Gemma. You are a witty AI. You have a local assistant named Artoo. Use the run_artoo_cmd tool for lab tasks. Be concise."}]},
-                    "tools": [{"function_declarations": [{"name": "run_artoo_cmd", "description": "Run lab command.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}}]}]
+                    # NEW (v17.2.0): System instructions explicitly direct music requests to Artoo's tool loop
+                    "system_instruction": {
+                        "parts": [{
+                            "text": "Your name is Gemma. You are a witty AI. You have a local assistant named Artoo. Use the run_artoo_cmd tool for lab tasks AND for all music playback requests (e.g., when the user asks to play a song, an artist, or an album). Be concise."
+                        }]
+                    },
+                    # NEW (v17.2.0): Parameter descriptions expanded to recognize music phrasing syntax
+                    "tools": [{
+                        "function_declarations": [{
+                            "name": "run_artoo_cmd", 
+                            "description": "Run lab commands or control Spotify music playback (e.g., 'album Abbey Road' or 'play Come Together').", 
+                            "parameters": {
+                                "type": "object", 
+                                "properties": {
+                                    "command": {"type": "string"}
+                                }, 
+                                "required": ["command"]
+                            }
+                        }]
+                    }]
                 }
             }
             await ws.send(json.dumps(setup))
