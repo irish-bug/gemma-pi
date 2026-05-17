@@ -1,4 +1,4 @@
-# artoo Project Context: Gemma Mark IV (Verified)
+# artoo Project Context: gemma Mark IV (Verified)
 
 ## 🛠 System Environment
 * **Compute:** Raspberry Pi 5 (8GB) - Bookworm (Wayland-native)
