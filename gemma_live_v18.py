@@ -1,9 +1,6 @@
-# --- v17.2.1 Gemma Live: Root-Level Tool Intercept Protocol ---
-# Change Message (v17.2.1): 
-# - Fixed receive_loop to intercept toolCall as a root WebSocket object instead of nested parts.
-# - Implemented explicit console logging (🔧 TOOL CALL) to track exactly when Gemma signals Artoo.
-# - Corrected client-to-server wire protocol to use camelCase (functionResponses) and pass mandatory tracking 'id'.
-# - Updated setup structure to use strict camelCase (functionDeclarations) to ensure server schema acceptance.
+# --- v18.0.0 Gemma Live: Root-Level Tool Intercept Protocol ---
+# Change Message (v18.0.1): 
+# - Update main to include circuit breaker logic and safety interlock
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -12,7 +9,7 @@ from openwakeword.model import Model
 
 # --- 1. CONFIG ---
 API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL = "gemini-flash-latest"
+MODEL = "gemini-2.0-flash"
 VOICE = "Aoede"
 
 HW_FS, API_IN_FS, API_OUT_FS = 48000, 16000, 24000
@@ -88,8 +85,8 @@ def spk_callback(outdata, frames, time, status):
 async def start_gemini_session():
     global last_activity_time
     last_activity_time = time.time()
-    uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
-    
+# The standard BidiGenerateContent endpoint for Live WebSocket sessions
+    uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"    
     try:
         async with websockets.connect(uri) as ws:
             setup = {
@@ -191,18 +188,42 @@ async def start_gemini_session():
 async def main():
     global loop
     loop = asyncio.get_running_loop()
-    try:
-        with sd.InputStream(device="default", channels=1, samplerate=HW_FS, callback=mic_callback, blocksize=3840), \
-             sd.OutputStream(device="default", channels=1, samplerate=HW_FS, callback=spk_callback, blocksize=1024):
-            print("[*] HOLMES IV Listening... ('Hey Mycroft')")
-            while True:
-                indata = await input_queue.get()
-                prediction = oww_model.predict((indata[::IN_RATIO] * 32767).astype(np.int16).flatten())
-                if prediction["hey_mycroft"] > 0.5:
-                    print("\n[!] Wake Word Detected!")
-                    await start_gemini_session()
-                    while not input_queue.empty(): input_queue.get_nowait()
-    except Exception as e: print(f"[!] Stream failure: {e}")
+    
+    # --- HARDWARE GATES ---
+    # These contexts link the Anker S500 to our mic/spk callbacks
+    with sd.InputStream(channels=1, samplerate=HW_FS, callback=mic_callback, blocksize=3840), \
+         sd.OutputStream(channels=1, samplerate=HW_FS, callback=spk_callback, blocksize=1024):
+        
+        print("\n[*] HOLMES IV Listening... ('Hey Mycroft')")
+        
+        while True:
+            # Wait for wake word inference data from the OWW worker
+            indata = await input_queue.get()
+            
+            # Wake word prediction logic
+            if oww_model.predict((indata[::IN_RATIO] * 32767).astype(np.int16).flatten())["hey_mycroft"] > 0.5:
+                print("\n[!] Wake Word Detected!")
+                
+                # --- CIRCUIT BREAKER ---
+                # Immediate check to prevent API hammering if we are already locked out
+                if os.path.exists("/tmp/gemma_locked"):
+                    print("[!] Gateway Locked: Backing off...")
+                    await asyncio.sleep(60) 
+                    continue
+                
+                # Start the BidiGenerateContent session
+                await start_gemini_session()
+                
+                # --- SAFETY INTERLOCK ---
+                # Flush the queue to prevent secondary wake-word triggers 
+                # caused by residual audio packets already in the buffer.
+                while not input_queue.empty():
+                    try:
+                        input_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                        
+                print("\n[*] HOLMES IV Listening... ('Hey Mycroft')")
 
 if __name__ == "__main__":
     try: asyncio.run(main())

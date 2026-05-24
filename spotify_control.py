@@ -19,13 +19,23 @@ def main():
     # Required permissions for controlling playback
     scope = "user-modify-playback-state user-read-playback-state"
     
+    # Absolute self-contained project configuration credentials
+    CLIENT_ID = "9d6fbdf00c2c40abafa3949764ef2fe1"
+    CLIENT_SECRET = "912d11c2ce22432ab78bcbb449bd0c9e"
+    REDIRECT_URI = "http://127.0.0.1:8888/callback"
+    CACHE_PATH = "/home/shane/google-labs/.cache"
+    
     # open_browser=False prints the authentication URL cleanly in the SSH terminal
     sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
         scope=scope,
+        cache_path=CACHE_PATH,
         open_browser=False
     ))
 
-# 1. Locate the Gemma Speaker Device ID
+    # 1. Locate the Gemma Speaker Device ID
     devices = sp.devices()
     device_id = None
     
@@ -42,8 +52,7 @@ def main():
         print("Error: GEMMA_Speaker not found in available devices. Is Raspotify awake?")
         sys.exit(1)
 
-    # 2. Search and Play
-# 2. Search for the Track or Album
+    # 2. Search for the Track or Album
     query = sys.argv[1]
     
     # Simple semantic routing: if the user says "album", search for an album
