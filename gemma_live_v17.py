@@ -1,12 +1,13 @@
-# --- v17.2.1 Gemma Live: Root-Level Tool Intercept Protocol ---
-# Change Message (v17.2.1): 
-# - Fixed receive_loop to intercept toolCall as a root WebSocket object instead of nested parts.
-# - Implemented explicit console logging (🔧 TOOL CALL) to track exactly when Gemma signals Artoo.
-# - Corrected client-to-server wire protocol to use camelCase (functionResponses) and pass mandatory tracking 'id'.
-# - Updated setup structure to use strict camelCase (functionDeclarations) to ensure server schema acceptance.
-# Change Message (v17.2.2): 
-# Added shebang to make code executable
-# Updated the the gemini-2.5-flash-native-audio-latest model which supports bidiGenerate Content
+# --- v17.2.3 Gemma Live: Root-Level Tool Intercept Protocol ---
+# REMINDER: Change Message (v17.2.2): 
+#     Added shebang to make code executable
+#     Updated the the gemini-2.5-flash-native-audio-latest model which supports bidiGenerate Content
+# The v17.2.3 Architecture Fixes
+#     API Key Fallback: Your terminal output noted GOOGLE_API_KEY was the active variable, but the script strictly pulled GEMINI_API_KEY. I added an or fallback.
+#     Setup Payload (camelCase): Converted generation_config, response_modalities, and system_instruction to strict Protobuf-compliant camelCase.
+#     Audio Ingress: Changed realtime_input to realtimeInput, and formatted the PCM payload into a mediaChunks array with mimeType instead of mime_type.
+#     Tool Egress: Updated tool_response to toolResponse and included the required name field in the payload.
+#     Auditory Feedback (Project Requirement): I injected an aplay subprocess right before local_artoo_executor fires. Now, when Gemma decides to route a command to Artoo, the Pi will give you that Droid beep.
 
 #!//home/shane/google-labs/gemma_stable_env/bin/python
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
@@ -15,7 +16,8 @@ import sounddevice as sd
 from openwakeword.model import Model
 
 # --- 1. CONFIG ---
-API_KEY = os.environ.get("GEMINI_API_KEY")
+# Fallback to ensure we grab the active key
+API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
 MODEL = "gemini-2.5-flash-native-audio-latest"
 VOICE = "Aoede"
 
@@ -50,7 +52,6 @@ def local_artoo_executor(command):
             
             print(f"⚡ [SYS] Artoo executing Spotify script with args: '{clean_cmd}'")
             
-            # Force the script to run INSIDE the google-labs directory where .cache lives
             result = subprocess.check_output(
                 [sys.executable, script_path, clean_cmd], 
                 text=True, 
@@ -73,11 +74,11 @@ def local_artoo_executor(command):
             return f"Error contacting Artoo: {str(e)}"
 
 # --- 3. AUDIO HANDLERS ---
-def mic_callback(indata, frames, time, status):
+def mic_callback(indata, frames, time_info, status):
     if not is_gemma_outputting_sound:
         loop.call_soon_threadsafe(input_queue.put_nowait, indata.copy())
 
-def spk_callback(outdata, frames, time, status):
+def spk_callback(outdata, frames, time_info, status):
     global output_buffer, is_gemma_outputting_sound
     with buffer_lock:
         if len(output_buffer) >= frames:
@@ -96,14 +97,15 @@ async def start_gemini_session():
     
     try:
         async with websockets.connect(uri) as ws:
+            # FIX: Enforce strict camelCase for Protobuf schema mapping
             setup = {
                 "setup": {
                     "model": f"models/{MODEL}",
-                    "generation_config": {
-                        "response_modalities": ["AUDIO"],
-                        "speech_config": {"voice_config": {"prebuilt_voice_config": {"voice_name": VOICE}}}
+                    "generationConfig": {
+                        "responseModalities": ["AUDIO"],
+                        "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE}}}
                     },
-                    "system_instruction": {
+                    "systemInstruction": {
                         "parts": [{
                             "text": "Your name is Gemma. You are a witty AI. You have a local assistant named Artoo. Whenever the user commands you to run a lab task, play music, or tells you to 'tell artoo' to do something, you MUST execute the run_artoo_cmd tool immediately. Do not just speak about doing it—fire the tool. Be concise."
                         }]
@@ -134,19 +136,28 @@ async def start_gemini_session():
                     indata = await input_queue.get()
                     downsampled = indata[::IN_RATIO]
                     audio_int16 = (np.clip(downsampled * MIC_BOOST, -1.0, 1.0) * 32767).astype(np.int16)
-                    await ws.send(json.dumps({"realtime_input": {"audio": {"data": base64.b64encode(audio_int16.tobytes()).decode(), "mime_type": "audio/L16;rate=16000"}}}))
+                    
+                    # FIX: realtimeInput and mediaChunks
+                    payload = {
+                        "realtimeInput": {
+                            "mediaChunks": [{
+                                "mimeType": "audio/pcm;rate=16000",
+                                "data": base64.b64encode(audio_int16.tobytes()).decode()
+                            }]
+                        }
+                    }
+                    await ws.send(json.dumps(payload))
                     
                     if time.time() - last_activity_time > 60:
                         print("\n[!] Watchdog: Reverting to local wake-word...")
-                        return # Exit the loop
+                        return 
 
             async def receive_loop():
                 global last_activity_time
                 async for message in ws:
                     msg = json.loads(message)
-                    last_activity_time = time.time() # Reset on any server activity
+                    last_activity_time = time.time()
                     
-                    # NEW (v17.2.1): Capture Tool Calls as root-level WebSocket objects
                     if "toolCall" in msg:
                         function_calls = msg["toolCall"].get("functionCalls", [])
                         for fc in function_calls:
@@ -156,14 +167,18 @@ async def start_gemini_session():
                             
                             print(f"\n🔧 [TOOL CALL] Gemma invoked '{func_name}' with string: '{cmd_args}'")
                             
+                            # Auditory feedback: System command intercept
+                            subprocess.run(["aplay", "-q", "/home/shane/google-labs/sounds/droid_beep.wav"], check=False)
+                            
                             # Execute the pipeline locally
                             execution_result = local_artoo_executor(cmd_args)
                             
-                            # Build the matching camelCase tracking payload for the Live API
+                            # FIX: toolResponse instead of tool_response + injected name
                             response_payload = {
-                                "tool_response": {
+                                "toolResponse": {
                                     "functionResponses": [{
                                         "id": call_id,
+                                        "name": func_name,
                                         "response": {"result": execution_result}
                                     }]
                                 }
@@ -171,7 +186,6 @@ async def start_gemini_session():
                             await ws.send(json.dumps(response_payload))
                             print(f"📡 [TOOL RESPONSE] Sent execution token back to cloud.")
 
-                    # Handle standard streaming media channels
                     if "serverContent" in msg:
                         parts = msg["serverContent"].get("modelTurn", {}).get("parts", [])
                         for part in parts:
@@ -182,13 +196,14 @@ async def start_gemini_session():
                             if "text" in part: 
                                 print(f"\n[Gemma]: {part['text']}")
 
-            # Run loops concurrently until termination
             done, pending = await asyncio.wait(
                 [asyncio.create_task(send_loop()), asyncio.create_task(receive_loop())],
                 return_when=asyncio.FIRST_COMPLETED
             )
-            for task in pending: task.cancel() # Clean exit cleanup
+            for task in pending: task.cancel() 
 
+    except websockets.exceptions.ConnectionClosedError as e:
+        print(f"\n[!] WebSocket Closed Unexpectedly (Code {e.code}, Reason: {e.reason})")
     except Exception as e:
         print(f"\n[!] Session Closed: {e}")
 
@@ -198,7 +213,7 @@ async def main():
     try:
         with sd.InputStream(device="default", channels=1, samplerate=HW_FS, callback=mic_callback, blocksize=3840), \
              sd.OutputStream(device="default", channels=1, samplerate=HW_FS, callback=spk_callback, blocksize=1024):
-            print("[*] HOLMES IV Listening... ('Hey Mycroft')")
+            print(f"[*] HOLMES IV Listening... ('Hey Mycroft')")
             while True:
                 indata = await input_queue.get()
                 prediction = oww_model.predict((indata[::IN_RATIO] * 32767).astype(np.int16).flatten())
