@@ -7,7 +7,7 @@ model = genai.GenerativeModel("gemini-2.0-flash")
 
 def run_command(prompt):
     # This uses standard REST inference, bypassing the WebSocket/Bidi gateway
-    response = model.generate_content(prompt)
+    response = model.generate_content(prompt)puy
     print(f"[Gemma]: {response.text}")
 
 if __name__ == "__main__":

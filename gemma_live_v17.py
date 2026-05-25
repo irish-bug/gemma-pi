@@ -4,7 +4,11 @@
 # - Implemented explicit console logging (🔧 TOOL CALL) to track exactly when Gemma signals Artoo.
 # - Corrected client-to-server wire protocol to use camelCase (functionResponses) and pass mandatory tracking 'id'.
 # - Updated setup structure to use strict camelCase (functionDeclarations) to ensure server schema acceptance.
+# Change Message (v17.2.2): 
+# Added shebang to make code executable
+# Updated the the gemini-2.5-flash-native-audio-latest model which supports bidiGenerate Content
 
+#!//home/shane/google-labs/gemma_stable_env/bin/python
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
 import sounddevice as sd
@@ -12,7 +16,7 @@ from openwakeword.model import Model
 
 # --- 1. CONFIG ---
 API_KEY = os.environ.get("GEMINI_API_KEY")
-MODEL = "gemini-flash-latest"
+MODEL = "gemini-2.5-flash-native-audio-latest"
 VOICE = "Aoede"
 
 HW_FS, API_IN_FS, API_OUT_FS = 48000, 16000, 24000
