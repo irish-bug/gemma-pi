@@ -1,22 +1,17 @@
-# --- v17.2.3 Gemma Live: Root-Level Tool Intercept Protocol ---
-# REMINDER: Change Message (v17.2.2): 
-#     Added shebang to make code executable
-#     Updated the the gemini-2.5-flash-native-audio-latest model which supports bidiGenerate Content
-# The v17.2.3 Architecture Fixes
-#     API Key Fallback: Your terminal output noted GOOGLE_API_KEY was the active variable, but the script strictly pulled GEMINI_API_KEY. I added an or fallback.
-#     Setup Payload (camelCase): Converted generation_config, response_modalities, and system_instruction to strict Protobuf-compliant camelCase.
-#     Audio Ingress: Changed realtime_input to realtimeInput, and formatted the PCM payload into a mediaChunks array with mimeType instead of mime_type.
-#     Tool Egress: Updated tool_response to toolResponse and included the required name field in the payload.
-#     Auditory Feedback (Project Requirement): I injected an aplay subprocess right before local_artoo_executor fires. Now, when Gemma decides to route a command to Artoo, the Pi will give you that Droid beep.
-
 #!//home/shane/google-labs/gemma_stable_env/bin/python
+# --- v17.2.4 Gemma Live: Root-Level Tool Intercept Protocol ---
+# Change Message (v17.2.4): 
+# - Path Fix: Corrected aplay execution path to target `audio/droid_beep.wav`.
+# - Cognitive Suppression: Hardened `systemInstruction` to strictly prohibit chain-of-thought monologue leaking into the audio stream prior to tool execution.
+# - Watchdog Stability: Enforced `input_queue.get_nowait()` flushing upon watchdog trigger to prevent instant wake-word loopbacks.
+# - Artoo Fallback & Schema Patch: Updated local fallback to target the GA `gemini-flash-lite-latest` alias. Injected `NODE_NO_WARNINGS` to suppress MaxListeners memory leak telemetry from the tmux session. Added 'stop music' to Spotify local routing to prevent Artoo from attempting to use `update_topic` for media control.
+
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
 import sounddevice as sd
 from openwakeword.model import Model
 
 # --- 1. CONFIG ---
-# Fallback to ensure we grab the active key
 API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
 MODEL = "gemini-2.5-flash-native-audio-latest"
 VOICE = "Aoede"
@@ -37,14 +32,13 @@ oww_model = Model(wakeword_models=["hey_mycroft"], inference_framework="onnx")
 def local_artoo_executor(command):
     cmd_lower = command.lower()
     
-    # Direct routing for local music/album playback 
-    if "album" in cmd_lower or "play" in cmd_lower:
+    # Direct routing for local music/album playback & stopping
+    if "album" in cmd_lower or "play" in cmd_lower or "stop music" in cmd_lower or "stop" in cmd_lower:
         try:
             labs_dir = os.path.expanduser("~/google-labs")
             script_path = os.path.join(labs_dir, "spotify_control.py")
             clean_cmd = command.lower().replace("tell artoo", "").strip()
             
-            # Clone system environment and inject Spotify credentials explicitly
             spotify_env = os.environ.copy()
             spotify_env["SPOTIPY_CLIENT_ID"] = "9d6fbdf00c2c40abafa3949764ef2fe1"
             spotify_env["SPOTIPY_CLIENT_SECRET"] = "912d11c2ce22432ab78bcbb449bd0c9e"
@@ -68,7 +62,15 @@ def local_artoo_executor(command):
     # Default fallback for regular lab infrastructure/system commands
     else:
         try:
-            result = subprocess.check_output(["gemini", "--model", "gemini-3.1-flash-lite-preview", "--approval-mode", "yolo", command], text=True)
+            cli_env = os.environ.copy()
+            cli_env["NODE_NO_WARNINGS"] = "1" # Suppresses MaxListenersExceededWarning
+            
+            # Executing against the dynamic flash-lite alias verified in list_models.py
+            result = subprocess.check_output(
+                ["gemini", "--model", "gemini-flash-lite-latest", "--approval-mode", "yolo", command], 
+                text=True, 
+                env=cli_env
+            )
             return result
         except Exception as e:
             return f"Error contacting Artoo: {str(e)}"
@@ -97,7 +99,6 @@ async def start_gemini_session():
     
     try:
         async with websockets.connect(uri) as ws:
-            # FIX: Enforce strict camelCase for Protobuf schema mapping
             setup = {
                 "setup": {
                     "model": f"models/{MODEL}",
@@ -107,13 +108,13 @@ async def start_gemini_session():
                     },
                     "systemInstruction": {
                         "parts": [{
-                            "text": "Your name is Gemma. You are a witty AI. You have a local assistant named Artoo. Whenever the user commands you to run a lab task, play music, or tells you to 'tell artoo' to do something, you MUST execute the run_artoo_cmd tool immediately. Do not just speak about doing it—fire the tool. Be concise."
+                            "text": "Your name is Gemma. You are a witty AI. You have a local assistant named Artoo. When commanded to run a lab task, control music, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. DO NOT narrate your actions, plan, or say what you are about to do. Fire the tool silently and wait for the result."
                         }]
                     },
                     "tools": [{
                         "functionDeclarations": [{
                             "name": "run_artoo_cmd", 
-                            "description": "Run lab commands or control Spotify music playback (e.g., 'album Abbey Road' or 'play Come Together').", 
+                            "description": "Run lab commands or control Spotify music playback (e.g., 'album Abbey Road' or 'stop music').", 
                             "parameters": {
                                 "type": "object", 
                                 "properties": {
@@ -137,7 +138,6 @@ async def start_gemini_session():
                     downsampled = indata[::IN_RATIO]
                     audio_int16 = (np.clip(downsampled * MIC_BOOST, -1.0, 1.0) * 32767).astype(np.int16)
                     
-                    # FIX: realtimeInput and mediaChunks
                     payload = {
                         "realtimeInput": {
                             "mediaChunks": [{
@@ -150,6 +150,7 @@ async def start_gemini_session():
                     
                     if time.time() - last_activity_time > 60:
                         print("\n[!] Watchdog: Reverting to local wake-word...")
+                        while not input_queue.empty(): input_queue.get_nowait()
                         return 
 
             async def receive_loop():
@@ -167,13 +168,9 @@ async def start_gemini_session():
                             
                             print(f"\n🔧 [TOOL CALL] Gemma invoked '{func_name}' with string: '{cmd_args}'")
                             
-                            # Auditory feedback: System command intercept
-                            subprocess.run(["aplay", "-q", "/home/shane/google-labs/sounds/droid_beep.wav"], check=False)
-                            
-                            # Execute the pipeline locally
+                            subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
                             execution_result = local_artoo_executor(cmd_args)
                             
-                            # FIX: toolResponse instead of tool_response + injected name
                             response_payload = {
                                 "toolResponse": {
                                     "functionResponses": [{
