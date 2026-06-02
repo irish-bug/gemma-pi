@@ -1,5 +1,8 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v17.2.4 Gemma Live: Root-Level Tool Intercept Protocol ---
+# --- v17.2.5 Gemma Live: Root-Level Tool Intercept Protocol ---
+# Change Message (v17.2.5): 
+# - Wake-Word Migration: Swapped openwakeword target to custom 'hey_gemma.onnx' and updated prediction tensor key to 'hey_gemma' to prevent KeyError crashes.
+# - Context Injection: Added hardcoded user_context (Shane / Golden, CO / MDT) directly into the BidiGenerateContent systemInstruction f-string to give Gemma zero-latency situational awareness without burning a tool call.
 # Change Message (v17.2.4): 
 # - Path Fix: Corrected aplay execution path to target `audio/droid_beep.wav`.
 # - Cognitive Suppression: Hardened `systemInstruction` to strictly prohibit chain-of-thought monologue leaking into the audio stream prior to tool execution.
@@ -26,7 +29,8 @@ buffer_lock = threading.Lock()
 is_gemma_outputting_sound = False 
 last_activity_time = time.time()
 
-oww_model = Model(wakeword_models=["hey_mycroft"], inference_framework="onnx")
+# Target explicit models directory for the custom ONNX file
+oww_model = Model(wakeword_models=["models/hey_gemma.onnx"], inference_framework="onnx")
 
 # --- 2. LOCAL TOOLS ---
 def local_artoo_executor(command):
@@ -97,6 +101,9 @@ async def start_gemini_session():
     last_activity_time = time.time()
     uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
     
+    # 1. Define the context here, before the WebSocket connects and builds the payload.
+    user_context = "User is Shane. Location is Golden, Colorado. Timezone is MDT."
+    
     try:
         async with websockets.connect(uri) as ws:
             setup = {
@@ -108,7 +115,8 @@ async def start_gemini_session():
                     },
                     "systemInstruction": {
                         "parts": [{
-                            "text": "Your name is Gemma. You are a witty AI. You have a local assistant named Artoo. When commanded to run a lab task, control music, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. DO NOT narrate your actions, plan, or say what you are about to do. Fire the tool silently and wait for the result."
+                            # Injected f-string with {user_context}
+                            "text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. DO NOT narrate your actions, plan, or say what you are about to do. Fire the tool silently and wait for the result."
                         }]
                     },
                     "tools": [{
@@ -210,11 +218,12 @@ async def main():
     try:
         with sd.InputStream(device="default", channels=1, samplerate=HW_FS, callback=mic_callback, blocksize=3840), \
              sd.OutputStream(device="default", channels=1, samplerate=HW_FS, callback=spk_callback, blocksize=1024):
-            print(f"[*] HOLMES IV Listening... ('Hey Mycroft')")
+            print(f"[*] HOLMES IV Listening... ('Hey Gemma')")
             while True:
                 indata = await input_queue.get()
                 prediction = oww_model.predict((indata[::IN_RATIO] * 32767).astype(np.int16).flatten())
-                if prediction["hey_mycroft"] > 0.5:
+                # Updated tensor key to match hey_gemma.onnx
+                if prediction["hey_gemma"] > 0.5:
                     print("\n[!] Wake Word Detected!")
                     await start_gemini_session()
                     while not input_queue.empty(): input_queue.get_nowait()
