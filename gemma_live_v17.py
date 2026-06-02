@@ -1,13 +1,12 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v17.2.5 Gemma Live: Root-Level Tool Intercept Protocol ---
+# --- v17.2.6 Gemma Live: Root-Level Tool Intercept Protocol ---
+# Change Message (v17.2.6):
+# - Graceful Shutdown Fix: Broadened WebSocket exception handling to catch `ConnectionClosed` (including `ConnectionClosedOK`) to prevent unretrieved task tracebacks when hitting CTRL+C.
+# - Duplex Gating (Self-Wake Fix): Added synchronous `subprocess.run` for the acknowledgment tone and toggled `is_gemma_outputting_sound` to block the mic from hearing its own wake ping.
+# - Cognitive Suppression (Hardened): Updated `systemInstruction` to strictly forbid markdown/narrative leakage during tool execution. 
 # Change Message (v17.2.5): 
 # - Wake-Word Migration: Swapped openwakeword target to custom 'hey_gemma.onnx' and updated prediction tensor key to 'hey_gemma' to prevent KeyError crashes.
-# - Context Injection: Added hardcoded user_context (Shane / Golden, CO / MDT) directly into the BidiGenerateContent systemInstruction f-string to give Gemma zero-latency situational awareness without burning a tool call.
-# Change Message (v17.2.4): 
-# - Path Fix: Corrected aplay execution path to target `audio/droid_beep.wav`.
-# - Cognitive Suppression: Hardened `systemInstruction` to strictly prohibit chain-of-thought monologue leaking into the audio stream prior to tool execution.
-# - Watchdog Stability: Enforced `input_queue.get_nowait()` flushing upon watchdog trigger to prevent instant wake-word loopbacks.
-# - Artoo Fallback & Schema Patch: Updated local fallback to target the GA `gemini-flash-lite-latest` alias. Injected `NODE_NO_WARNINGS` to suppress MaxListeners memory leak telemetry from the tmux session. Added 'stop music' to Spotify local routing to prevent Artoo from attempting to use `update_topic` for media control.
+# - Context Injection: Added hardcoded user_context (Shane / Golden, CO / MDT) directly into the BidiGenerateContent systemInstruction f-string.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -101,7 +100,7 @@ async def start_gemini_session():
     last_activity_time = time.time()
     uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
     
-    # 1. Define the context here, before the WebSocket connects and builds the payload.
+    # User Context Definition
     user_context = "User is Shane. Location is Golden, Colorado. Timezone is MDT."
     
     try:
@@ -115,8 +114,8 @@ async def start_gemini_session():
                     },
                     "systemInstruction": {
                         "parts": [{
-                            # Injected f-string with {user_context}
-                            "text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. DO NOT narrate your actions, plan, or say what you are about to do. Fire the tool silently and wait for the result."
+                            # Cognitive suppression and context injection applied
+                            "text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. CRITICAL: Do not output markdown text headers or text explanations of your thoughts while using tools or search. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result."
                         }]
                     },
                     "tools": [{
@@ -207,24 +206,37 @@ async def start_gemini_session():
             )
             for task in pending: task.cancel() 
 
-    except websockets.exceptions.ConnectionClosedError as e:
-        print(f"\n[!] WebSocket Closed Unexpectedly (Code {e.code}, Reason: {e.reason})")
+    # Broadened to catch both normal closures (1000) and abnormal ones
+    except websockets.exceptions.ConnectionClosed as e:
+        print(f"\n[!] WebSocket Closed (Code {e.code}, Reason: {e.reason})")
     except Exception as e:
         print(f"\n[!] Session Closed: {e}")
 
 async def main():
-    global loop
+    global loop, is_gemma_outputting_sound
     loop = asyncio.get_running_loop()
     try:
         with sd.InputStream(device="default", channels=1, samplerate=HW_FS, callback=mic_callback, blocksize=3840), \
              sd.OutputStream(device="default", channels=1, samplerate=HW_FS, callback=spk_callback, blocksize=1024):
-            print(f"[*] HOLMES IV Listening... ('Hey Gemma')")
+            print(f"[*] Gemma Listening... ('Hey Gemma')")
             while True:
                 indata = await input_queue.get()
                 prediction = oww_model.predict((indata[::IN_RATIO] * 32767).astype(np.int16).flatten())
-                # Updated tensor key to match hey_gemma.onnx
                 if prediction["hey_gemma"] > 0.5:
                     print("\n[!] Wake Word Detected!")
+                    
+                    # 1. Gate the mic to ignore the speaker echo
+                    is_gemma_outputting_sound = True
+                    
+                    # 2. Play the acknowledgment tone synchronously
+                    subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
+                    
+                    # 3. Open the mic back up
+                    is_gemma_outputting_sound = False
+                    
+                    # 4. Flush stale audio buffer data accumulated during the tone
+                    while not input_queue.empty(): input_queue.get_nowait()
+                    
                     await start_gemini_session()
                     while not input_queue.empty(): input_queue.get_nowait()
     except Exception as e: print(f"[!] Stream failure: {e}")
