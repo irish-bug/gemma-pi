@@ -72,7 +72,7 @@ def local_artoo_executor(command):
             if len(parts) > 1 and parts[1].isdigit():
                 seconds = int(parts[1])
                 # Fire a detached background process: sleep for X seconds, then beep 3 times
-                alarm_cmd = f"sleep {seconds} && for i in {{1..3}}; do aplay -q /home/shane/google-labs/audio/ack.wav; sleep 0.5; done"
+                alarm_cmd = f"sleep {seconds} && for i in {{1..3}}; do aplay -q /home/shane/google-labs/audio/overwhelmed.wav; sleep 0.5; done"
                 subprocess.Popen(["bash", "-c", alarm_cmd])
                 print(f"⚡ [SYS] Artoo deployed background timer for {seconds} seconds.")
                 return f"Artoo successfully started a timer for {seconds} seconds."
