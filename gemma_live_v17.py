@@ -1,12 +1,11 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v17.2.7 Gemma Live: Root-Level Tool Intercept Protocol ---
-# Change Message (v17.2.7)
+# --- v17.2.9 Gemma Live: Root-Level Tool Intercept Protocol ---
+# Change Message (v17.2.9) (Merge Update):
+# - Context & Sensitivity Tweaks: Merged user updates for highly specific local address (186 Pinto St.), bumped wake-word threshold to 0.85, and added a 5-second asyncio cooldown after session termination to prevent immediate re-triggering.
+# - Local Timer Support: Injected a timer routing block into `local_artoo_executor` that spawns a detached bash process to sleep and play an alarm sequence. Updated `run_artoo_cmd` tool description to enforce the "timer [seconds]" syntax.
+# Change Message (v17.2.7):
 # - ONNX Log Suppression: Imported onnxruntime and forced logger severity to 3 (ERROR) to stop the /sys/class/drm/ GPU probe spam on the Pi.
-# - Wake-Word Tuning: Raised the openwakeword prediction threshold from 0.5 to 0.75 to eliminate false-positive ghost triggers in quiet rooms.
-# - Terminal Clean-up (Search CoT): Added a filter to suppress the output of Gemma's internal chain-of-thought markdown (Google Search grounding) so it stops spamming the CLI.
-# Change Message (v17.2.6):
-# - Graceful Shutdown Fix: Broadened WebSocket exception handling to catch `ConnectionClosed` to prevent unretrieved task tracebacks when hitting CTRL+C.
-# - Duplex Gating: Added synchronous `subprocess.run` for the acknowledgment tone and toggled `is_gemma_outputting_sound` to block the mic from hearing its own wake ping.
+# - Terminal Clean-up (Search CoT): Added a filter to suppress the output of Gemma's internal chain-of-thought markdown.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -66,6 +65,22 @@ def local_artoo_executor(command):
         except Exception as e:
             return f"Error executing Spotify command: {str(e)}"
             
+    # Direct routing for local timers
+    elif cmd_lower.startswith("timer"):
+        try:
+            parts = cmd_lower.split()
+            if len(parts) > 1 and parts[1].isdigit():
+                seconds = int(parts[1])
+                # Fire a detached background process: sleep for X seconds, then beep 3 times
+                alarm_cmd = f"sleep {seconds} && for i in {{1..3}}; do aplay -q /home/shane/google-labs/audio/ack.wav; sleep 0.5; done"
+                subprocess.Popen(["bash", "-c", alarm_cmd])
+                print(f"⚡ [SYS] Artoo deployed background timer for {seconds} seconds.")
+                return f"Artoo successfully started a timer for {seconds} seconds."
+            else:
+                return "Artoo failed: Timer command missing valid seconds parameter."
+        except Exception as e:
+            return f"Error setting timer: {str(e)}"
+
     # Default fallback for regular lab infrastructure/system commands
     else:
         try:
@@ -118,13 +133,13 @@ async def start_gemini_session():
                     },
                     "systemInstruction": {
                         "parts": [{
-                            "text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. CRITICAL: Do not output markdown text headers or text explanations of your thoughts while using tools or search. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result."
+                            "text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, set a timer, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. CRITICAL: Do not output markdown text headers or text explanations of your thoughts while using tools or search. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result."
                         }]
                     },
                     "tools": [{
                         "functionDeclarations": [{
                             "name": "run_artoo_cmd", 
-                            "description": "Run lab commands or control Spotify music playback (e.g., 'album Abbey Road' or 'stop music').", 
+                            "description": "Run lab commands, control Spotify music, or set a timer. For timers, you MUST output exactly 'timer [seconds]' (e.g. 'timer 300' for 5 minutes).", 
                             "parameters": {
                                 "type": "object", 
                                 "properties": {
@@ -247,6 +262,8 @@ async def main():
                     
                     await start_gemini_session()
                     while not input_queue.empty(): input_queue.get_nowait()
+                    
+                    # Cooldown period
                     await asyncio.sleep(5)
     except Exception as e: print(f"[!] Stream failure: {e}")
 
