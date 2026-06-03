@@ -1,0 +1,236 @@
+Loading models...
+Testing 58 clips...
+
+--- Testing: hey_gemma_001.wav ---
+New Custom   max confidence: 0.8639
+Old/Bak      max confidence: 0.1814
+
+--- Testing: hey_gemma_002.wav ---
+New Custom   max confidence: 0.2664
+Old/Bak      max confidence: 0.0877
+
+--- Testing: hey_gemma_003.wav ---
+New Custom   max confidence: 0.7951
+Old/Bak      max confidence: 0.1936
+
+--- Testing: hey_gemma_004.wav ---
+New Custom   max confidence: 0.8695
+Old/Bak      max confidence: 0.1821
+
+--- Testing: hey_gemma_005.wav ---
+New Custom   max confidence: 0.7284
+Old/Bak      max confidence: 0.1623
+
+--- Testing: hey_gemma_006.wav ---
+New Custom   max confidence: 0.8521
+Old/Bak      max confidence: 0.1785
+
+--- Testing: hey_gemma_007.wav ---
+New Custom   max confidence: 0.1112
+Old/Bak      max confidence: 0.0817
+
+--- Testing: hey_gemma_008.wav ---
+New Custom   max confidence: 0.5252
+Old/Bak      max confidence: 0.0505
+
+--- Testing: hey_gemma_009.wav ---
+New Custom   max confidence: 0.6955
+Old/Bak      max confidence: 0.1349
+
+--- Testing: hey_gemma_010.wav ---
+New Custom   max confidence: 0.8176
+Old/Bak      max confidence: 0.1151
+
+--- Testing: hey_gemma_011.wav ---
+New Custom   max confidence: 0.8395
+Old/Bak      max confidence: 0.1340
+
+--- Testing: hey_gemma_012.wav ---
+New Custom   max confidence: 0.0069
+Old/Bak      max confidence: 0.0606
+
+--- Testing: hey_gemma_013.wav ---
+New Custom   max confidence: 0.1292
+Old/Bak      max confidence: 0.0770
+
+--- Testing: hey_gemma_014.wav ---
+New Custom   max confidence: 0.8228
+Old/Bak      max confidence: 0.1916
+
+--- Testing: hey_gemma_015.wav ---
+New Custom   max confidence: 0.8608
+Old/Bak      max confidence: 0.0573
+
+--- Testing: hey_gemma_016.wav ---
+New Custom   max confidence: 0.0010
+Old/Bak      max confidence: 0.0072
+
+--- Testing: hey_gemma_017.wav ---
+New Custom   max confidence: 0.5359
+Old/Bak      max confidence: 0.0466
+
+--- Testing: hey_gemma_018.wav ---
+New Custom   max confidence: 0.8209
+Old/Bak      max confidence: 0.1634
+
+--- Testing: hey_gemma_019.wav ---
+New Custom   max confidence: 0.8643
+Old/Bak      max confidence: 0.7915
+
+--- Testing: hey_gemma_020.wav ---
+New Custom   max confidence: 0.6748
+Old/Bak      max confidence: 0.0522
+
+--- Testing: hey_gemma_021.wav ---
+New Custom   max confidence: 0.8375
+Old/Bak      max confidence: 0.0818
+
+--- Testing: hey_gemma_022.wav ---
+New Custom   max confidence: 0.8526
+Old/Bak      max confidence: 0.2478
+
+--- Testing: hey_gemma_023.wav ---
+New Custom   max confidence: 0.8020
+Old/Bak      max confidence: 0.4381
+
+--- Testing: hey_gemma_024.wav ---
+New Custom   max confidence: 0.0075
+Old/Bak      max confidence: 0.0255
+
+--- Testing: hey_gemma_025.wav ---
+New Custom   max confidence: 0.0082
+Old/Bak      max confidence: 0.0226
+
+--- Testing: hey_gemma_026.wav ---
+New Custom   max confidence: 0.0042
+Old/Bak      max confidence: 0.0810
+
+--- Testing: hey_gemma_027.wav ---
+New Custom   max confidence: 0.0012
+Old/Bak      max confidence: 0.0305
+
+--- Testing: hey_gemma_028.wav ---
+New Custom   max confidence: 0.0058
+Old/Bak      max confidence: 0.4430
+
+--- Testing: hey_gemma_031.wav ---
+New Custom   max confidence: 0.4171
+Old/Bak      max confidence: 0.0340
+
+--- Testing: hey_gemma_032.wav ---
+New Custom   max confidence: 0.5589
+Old/Bak      max confidence: 0.1255
+
+--- Testing: hey_gemma_033.wav ---
+New Custom   max confidence: 0.7631
+Old/Bak      max confidence: 0.5771
+
+--- Testing: hey_gemma_034.wav ---
+New Custom   max confidence: 0.6053
+Old/Bak      max confidence: 0.3222
+
+--- Testing: hey_gemma_035.wav ---
+New Custom   max confidence: 0.0010
+Old/Bak      max confidence: 0.0077
+
+--- Testing: hey_gemma_036.wav ---
+New Custom   max confidence: 0.0014
+Old/Bak      max confidence: 0.0082
+
+--- Testing: hey_gemma_037.wav ---
+New Custom   max confidence: 0.5190
+Old/Bak      max confidence: 0.0995
+
+--- Testing: hey_gemma_038.wav ---
+New Custom   max confidence: 0.0009
+Old/Bak      max confidence: 0.0062
+
+--- Testing: hey_gemma_039.wav ---
+New Custom   max confidence: 0.0013
+Old/Bak      max confidence: 0.0709
+
+--- Testing: hey_gemma_040.wav ---
+New Custom   max confidence: 0.3221
+Old/Bak      max confidence: 0.2134
+
+--- Testing: hey_gemma_041.wav ---
+New Custom   max confidence: 0.4749
+Old/Bak      max confidence: 0.0750
+
+--- Testing: hey_gemma_042.wav ---
+New Custom   max confidence: 0.8599
+Old/Bak      max confidence: 0.3646
+
+--- Testing: hey_gemma_043.wav ---
+New Custom   max confidence: 0.8038
+Old/Bak      max confidence: 0.1342
+
+--- Testing: hey_gemma_044.wav ---
+New Custom   max confidence: 0.8211
+Old/Bak      max confidence: 0.4021
+
+--- Testing: hey_gemma_045.wav ---
+New Custom   max confidence: 0.8491
+Old/Bak      max confidence: 0.2385
+
+--- Testing: hey_gemma_046.wav ---
+New Custom   max confidence: 0.5000
+Old/Bak      max confidence: 0.1570
+
+--- Testing: hey_gemma_047.wav ---
+New Custom   max confidence: 0.8483
+Old/Bak      max confidence: 0.3237
+
+--- Testing: hey_gemma_048.wav ---
+New Custom   max confidence: 0.8651
+Old/Bak      max confidence: 0.0931
+
+--- Testing: hey_gemma_049.wav ---
+New Custom   max confidence: 0.8075
+Old/Bak      max confidence: 0.3832
+
+--- Testing: hey_gemma_050.wav ---
+New Custom   max confidence: 0.6625
+Old/Bak      max confidence: 0.2722
+
+--- Testing: hey_gemma_051.wav ---
+New Custom   max confidence: 0.7769
+Old/Bak      max confidence: 0.7081
+
+--- Testing: hey_gemma_052.wav ---
+New Custom   max confidence: 0.0471
+Old/Bak      max confidence: 0.6976
+
+--- Testing: hey_gemma_053.wav ---
+New Custom   max confidence: 0.0018
+Old/Bak      max confidence: 0.2179
+
+--- Testing: hey_gemma_054.wav ---
+New Custom   max confidence: 0.0015
+Old/Bak      max confidence: 0.1230
+
+--- Testing: hey_gemma_055.wav ---
+New Custom   max confidence: 0.5935
+Old/Bak      max confidence: 0.3266
+
+--- Testing: hey_gemma_056.wav ---
+New Custom   max confidence: 0.0157
+Old/Bak      max confidence: 0.0955
+
+--- Testing: hey_gemma_057.wav ---
+New Custom   max confidence: 0.0009
+Old/Bak      max confidence: 0.0051
+
+--- Testing: hey_gemma_058.wav ---
+New Custom   max confidence: 0.0009
+Old/Bak      max confidence: 0.0102
+
+--- Testing: hey_gemma_059.wav ---
+New Custom   max confidence: 0.7399
+Old/Bak      max confidence: 0.2022
+
+--- Testing: hey_gemma_060.wav ---
+New Custom   max confidence: 0.8707
+Old/Bak      max confidence: 0.2359
+
+Comparison complete.

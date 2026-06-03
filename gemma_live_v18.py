@@ -1,5 +1,5 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.0.0 Gemma Live: Modular Architecture Refactor ---
+# --- v18.0.1 Gemma Live: Modular Architecture Refactor ---
 # Change Message (v18.0.0):
 # - Structural Refactor: Extracted `local_artoo_executor` into a standalone `artoo_tools.py` module to cleanly separate the websocket/audio streaming engine from OS-level tool executions. 
 # - Carried over all context tweaks (186 Pinto St, 0.85 threshold, 5s cooldown, cli execution capabilities).
@@ -180,7 +180,7 @@ async def main():
                 prediction = oww_model.predict((indata[::IN_RATIO] * 32767).astype(np.int16).flatten())
                 
                 # BUMPED THRESHOLD: 0.85 prevents ghost triggers
-                if prediction["hey_gemma"] > 0.85:
+                if prediction["hey_gemma"] > 0.70:
                     print("\n[!] Wake Word Detected!")
                     
                     # 1. Gate the mic to ignore the speaker echo
@@ -204,6 +204,9 @@ async def main():
                         while not input_queue.empty():
                             input_queue.get_nowait()
                         await asyncio.sleep(0.1)
+                        # --- THE FIX: Wipe the internal audio buffer ---
+                    oww_model.reset()
+
                     print("[*] Listener re-armed.")
     except Exception as e: print(f"[!] Stream failure: {e}")
 
