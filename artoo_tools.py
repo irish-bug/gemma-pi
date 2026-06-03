@@ -4,19 +4,24 @@ import subprocess
 import time
 import re
 
-__version__ = "18.0.1"
+__version__ = "18.0.2"
 
 def local_artoo_executor(command):
     """
     Executes local system commands parsed from Gemma's tool calls.
-    Version: 18.0.1
+    Version: 18.0.2
+    
+    CHANGELOG:
+    - v18.0.2: Broadened weight-logging regex to catch 'pounds' and 'lbs'. Updated hardcoded file path to '/home/shane/Documents/health_data/weight_tracker.txt'. Silenced stderr spam in the generic fallback block (DEVNULL) to prevent IDE connection crash loops.
+    - v18.0.1: Added regex-based local weight logging.
+    - v18.0.0: Initial extraction from main script. Supports Spotify, Timers, CLI execution, and fallback.
     
     This executor acts as a bridge between the cloud LLM and the local OS, 
     routing natural language intents into specific local hardware actions. 
     It currently supports:
     1. Spotify Connect media routing (via spotify_control.py)
     2. Detached asynchronous background timers (via bash sleep)
-    3. Dedicated local weight logging (regex parsing to weigh_ins.txt)
+    3. Dedicated local weight logging (regex parsing to weight_tracker.txt)
     4. Raw native Linux CLI execution (via the 'cli:' prefix)
     5. Fallback inference to a local shell wrapper for generic lab tasks
     """
@@ -65,7 +70,7 @@ def local_artoo_executor(command):
             return f"Error setting timer: {str(e)}"
 
     # 3. Direct routing for Local Weight Logging
-    elif "weight" in cmd_lower or "weigh" in cmd_lower:
+    elif "weight" in cmd_lower or "weigh" in cmd_lower or "pound" in cmd_lower or "lbs" in cmd_lower:
         try:
             # Extract the first decimal or whole number from the string
             match = re.search(r'\d+(\.\d+)?', cmd_lower)
@@ -74,7 +79,12 @@ def local_artoo_executor(command):
                 date_str = time.strftime('%m/%d/%Y')
                 log_entry = f"{date_str}: {weight_val} lbs"
                 
-                file_path = os.path.expanduser("~/google-labs/weigh_ins.txt")
+                # Targeted to the correct health tracking document
+                file_path = "/home/shane/Documents/health_data/weight_tracker.txt"
+                
+                # Ensure the directory exists before writing to avoid FileNotFoundError
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                
                 with open(file_path, "a") as f:
                     f.write(log_entry + "\n")
                     
@@ -112,6 +122,8 @@ def local_artoo_executor(command):
             result = subprocess.check_output(
                 ["gemini", "--model", "gemini-flash-lite-latest", "--approval-mode", "yolo", command], 
                 text=True, 
+                # DEVNULL suppresses the VS Code IDE extension connection errors
+                stderr=subprocess.DEVNULL,
                 env=cli_env
             )
             return result

@@ -1,5 +1,5 @@
-# Project Artoo - Operational Makefile v17.2
-# Status: Synchronized with gemma_stable_env & Gemma Live v17
+# Project Artoo - Operational Makefile v18
+# Status: Synchronized with gemma_stable_env & Gemma Live v18
 
 .PHONY: setup test run commit clean
 
@@ -21,14 +21,15 @@ setup:
 # Verification Layer (Bypasses nuked test files to prevent compiler blocks)
 test:
 	@echo "Verifying local code syntax baseline..."
-	@$(PYTHON) -m py_compile /home/shane/google-labs/gemma_live_v17.py
+	@$(PYTHON) -m py_compile /home/shane/google-labs/gemma_live_v18.py
+	@$(PYTHON) -m py_compile /home/shane/google-labs/artoo_tools.py
 	@$(PYTHON) -m py_compile /home/shane/google-labs/spotify_control.py
 	@echo " [SUCCESS] Core scripts are structurally sound."
 
 # Launch the Primary Live Voice Engine
 run:
 	@echo "Launching Gemma Live Bidirectional Voice Engine..."
-	@PA_ALSA_PLUGHW=1 $(PYTHON) /home/shane/google-labs/gemma_live_v17.py
+	@PA_ALSA_PLUGHW=1 $(PYTHON) /home/shane/google-labs/gemma_live_v18.py
 
 # Safe Automated Cloud Deployment Chain
 commit:

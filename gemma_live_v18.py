@@ -196,10 +196,15 @@ async def main():
                     while not input_queue.empty(): input_queue.get_nowait()
                     
                     await start_gemini_session()
-                    while not input_queue.empty(): input_queue.get_nowait()
                     
-                    # Cooldown period
-                    await asyncio.sleep(5)
+                    # Robust Cooldown: Flush the input queue continuously for 5 seconds to clear fan noise/echo
+                    print("[*] Cooling down...")
+                    end_time = time.time() + 5
+                    while time.time() < end_time:
+                        while not input_queue.empty():
+                            input_queue.get_nowait()
+                        await asyncio.sleep(0.1)
+                    print("[*] Listener re-armed.")
     except Exception as e: print(f"[!] Stream failure: {e}")
 
 if __name__ == "__main__":
