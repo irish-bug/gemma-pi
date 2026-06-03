@@ -1,23 +1,24 @@
-#__version__ = "18.0.0"
-# Executes local system commands parsed from Gemma's tool calls.
-#   Version: 18.0.0
-    
-#   This executor acts as a bridge between the cloud LLM and the local OS, 
-#   routing natural language intents into specific local hardware actions. 
-#   It currently supports:
-#   1. Spotify Connect media routing (via spotify_control.py)
-#   2. Detached asynchronous background timers (via bash sleep)
-#   3. Raw native Linux CLI execution (via the 'cli:' prefix)
-#   4. Fallback inference to a local shell wrapper for generic lab tasks
-
-
 import os
 import sys
 import subprocess
+import time
+import re
+
+__version__ = "18.0.1"
 
 def local_artoo_executor(command):
     """
     Executes local system commands parsed from Gemma's tool calls.
+    Version: 18.0.1
+    
+    This executor acts as a bridge between the cloud LLM and the local OS, 
+    routing natural language intents into specific local hardware actions. 
+    It currently supports:
+    1. Spotify Connect media routing (via spotify_control.py)
+    2. Detached asynchronous background timers (via bash sleep)
+    3. Dedicated local weight logging (regex parsing to weigh_ins.txt)
+    4. Raw native Linux CLI execution (via the 'cli:' prefix)
+    5. Fallback inference to a local shell wrapper for generic lab tasks
     """
     cmd_lower = command.lower()
     
@@ -63,7 +64,28 @@ def local_artoo_executor(command):
         except Exception as e:
             return f"Error setting timer: {str(e)}"
 
-    # 3. Direct routing for Native Linux CLI Commands (File appends, system checks, etc.)
+    # 3. Direct routing for Local Weight Logging
+    elif "weight" in cmd_lower or "weigh" in cmd_lower:
+        try:
+            # Extract the first decimal or whole number from the string
+            match = re.search(r'\d+(\.\d+)?', cmd_lower)
+            if match:
+                weight_val = match.group()
+                date_str = time.strftime('%m/%d/%Y')
+                log_entry = f"{date_str}: {weight_val} lbs"
+                
+                file_path = os.path.expanduser("~/google-labs/weigh_ins.txt")
+                with open(file_path, "a") as f:
+                    f.write(log_entry + "\n")
+                    
+                print(f"⚡ [SYS] Artoo logged weight to {file_path}: {log_entry}")
+                return f"Artoo successfully appended '{log_entry}' to the local tracker."
+            else:
+                return "Artoo failed: Could not detect a valid number in the weight command."
+        except Exception as e:
+            return f"Error logging weight: {str(e)}"
+
+    # 4. Direct routing for Native Linux CLI Commands
     elif cmd_lower.startswith("cli:"):
         try:
             raw_cmd = command[4:].strip()
@@ -81,7 +103,7 @@ def local_artoo_executor(command):
         except Exception as e:
             return f"Error executing CLI command: {str(e)}"
 
-    # 4. Default fallback for generic LLM lab infrastructure/system commands
+    # 5. Default fallback for generic LLM lab infrastructure/system commands
     else:
         try:
             cli_env = os.environ.copy()
