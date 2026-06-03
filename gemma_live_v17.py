@@ -1,19 +1,23 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v17.2.6 Gemma Live: Root-Level Tool Intercept Protocol ---
+# --- v17.2.7 Gemma Live: Root-Level Tool Intercept Protocol ---
+# Change Message (v17.2.7)
+# - ONNX Log Suppression: Imported onnxruntime and forced logger severity to 3 (ERROR) to stop the /sys/class/drm/ GPU probe spam on the Pi.
+# - Wake-Word Tuning: Raised the openwakeword prediction threshold from 0.5 to 0.75 to eliminate false-positive ghost triggers in quiet rooms.
+# - Terminal Clean-up (Search CoT): Added a filter to suppress the output of Gemma's internal chain-of-thought markdown (Google Search grounding) so it stops spamming the CLI.
 # Change Message (v17.2.6):
-# - Graceful Shutdown Fix: Broadened WebSocket exception handling to catch `ConnectionClosed` (including `ConnectionClosedOK`) to prevent unretrieved task tracebacks when hitting CTRL+C.
-# - Duplex Gating (Self-Wake Fix): Added synchronous `subprocess.run` for the acknowledgment tone and toggled `is_gemma_outputting_sound` to block the mic from hearing its own wake ping.
-# - Cognitive Suppression (Hardened): Updated `systemInstruction` to strictly forbid markdown/narrative leakage during tool execution. 
-# Change Message (v17.2.5): 
-# - Wake-Word Migration: Swapped openwakeword target to custom 'hey_gemma.onnx' and updated prediction tensor key to 'hey_gemma' to prevent KeyError crashes.
-# - Context Injection: Added hardcoded user_context (Shane / Golden, CO / MDT) directly into the BidiGenerateContent systemInstruction f-string.
+# - Graceful Shutdown Fix: Broadened WebSocket exception handling to catch `ConnectionClosed` to prevent unretrieved task tracebacks when hitting CTRL+C.
+# - Duplex Gating: Added synchronous `subprocess.run` for the acknowledgment tone and toggled `is_gemma_outputting_sound` to block the mic from hearing its own wake ping.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
 import sounddevice as sd
+import onnxruntime as ort
 from openwakeword.model import Model
 
 # --- 1. CONFIG ---
+# Suppress the ONNX C++ GPU probing warnings before loading openwakeword
+ort.set_default_logger_severity(3)
+
 API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
 MODEL = "gemini-2.5-flash-native-audio-latest"
 VOICE = "Aoede"
@@ -101,7 +105,7 @@ async def start_gemini_session():
     uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
     
     # User Context Definition
-    user_context = "User is Shane. Location is Golden, Colorado. Timezone is MDT."
+    user_context = "User is Shane. Location is 186 Pinto St. Golden, Colorado. Timezone is MDT."
     
     try:
         async with websockets.connect(uri) as ws:
@@ -114,7 +118,6 @@ async def start_gemini_session():
                     },
                     "systemInstruction": {
                         "parts": [{
-                            # Cognitive suppression and context injection applied
                             "text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. CRITICAL: Do not output markdown text headers or text explanations of your thoughts while using tools or search. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result."
                         }]
                     },
@@ -198,7 +201,10 @@ async def start_gemini_session():
                                 audio_fp32 = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
                                 with buffer_lock: output_buffer.extend(np.repeat(audio_fp32, OUT_RATIO).tolist())
                             if "text" in part: 
-                                print(f"\n[Gemma]: {part['text']}")
+                                text_out = part["text"].strip()
+                                # Suppress printing if it looks like a Google Search chain-of-thought block
+                                if not text_out.startswith("**"):
+                                    print(f"\n[Gemma]: {text_out}")
 
             done, pending = await asyncio.wait(
                 [asyncio.create_task(send_loop()), asyncio.create_task(receive_loop())],
@@ -222,7 +228,9 @@ async def main():
             while True:
                 indata = await input_queue.get()
                 prediction = oww_model.predict((indata[::IN_RATIO] * 32767).astype(np.int16).flatten())
-                if prediction["hey_gemma"] > 0.5:
+                
+                # BUMPED THRESHOLD: 0.85 prevents ghost triggers
+                if prediction["hey_gemma"] > 0.85:
                     print("\n[!] Wake Word Detected!")
                     
                     # 1. Gate the mic to ignore the speaker echo
@@ -239,6 +247,7 @@ async def main():
                     
                     await start_gemini_session()
                     while not input_queue.empty(): input_queue.get_nowait()
+                    await asyncio.sleep(5)
     except Exception as e: print(f"[!] Stream failure: {e}")
 
 if __name__ == "__main__":
