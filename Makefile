@@ -21,7 +21,7 @@ setup:
 # Verification Layer (Bypasses nuked test files to prevent compiler blocks)
 test:
 	@echo "Verifying local code syntax baseline..."
-	@$(PYTHON) -m py_compile /home/shane/google-labs/gemma_live_v18.py
+	@$(PYTHON) -m py_compile /home/shane/google-labs/gemma_runtime.py
 	@$(PYTHON) -m py_compile /home/shane/google-labs/artoo_tools.py
 	@$(PYTHON) -m py_compile /home/shane/google-labs/spotify_control.py
 	@echo " [SUCCESS] Core scripts are structurally sound."
@@ -29,7 +29,7 @@ test:
 # Launch the Primary Live Voice Engine
 run:
 	@echo "Launching Gemma Live Bidirectional Voice Engine..."
-	@PA_ALSA_PLUGHW=1 $(PYTHON) /home/shane/google-labs/gemma_live_v18.py
+	@PA_ALSA_PLUGHW=1 $(PYTHON) /home/shane/google-labs/gemma_runtime.py
 
 # Safe Automated Cloud Deployment Chain
 commit:

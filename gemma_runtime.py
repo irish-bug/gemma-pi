@@ -1,12 +1,17 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.0.1 Gemma Live: Modular Architecture Refactor ---
-# Change Message (v18.0.0):
+# --- v18.0.2 Gemma Live: Modular Architecture Refactor ---
+# Change Message (v18.0.2):
+# Reduce timeout to 15s of silence and fixed interaction logging to write to the activity log.
+# Change Message (v18.0.1):
 # - Structural Refactor: Extracted `local_artoo_executor` into a standalone `artoo_tools.py` module to cleanly separate the websocket/audio streaming engine from OS-level tool executions. 
 # - Carried over all context tweaks (186 Pinto St, 0.85 threshold, 5s cooldown, cli execution capabilities).
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
 import sounddevice as sd
+
+# Force suppress ONNX logging before any imports
+os.environ["ORT_LOG_SEVERITY_LEVEL"] = "3"
 import onnxruntime as ort
 from openwakeword.model import Model
 
@@ -14,6 +19,7 @@ from openwakeword.model import Model
 from artoo_tools import local_artoo_executor
 
 # --- 1. CONFIG ---
+# This line is kept for legacy purposes, but the os.environ above is more reliable
 ort.set_default_logger_severity(3)
 
 API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
@@ -108,7 +114,7 @@ async def start_gemini_session():
                     }
                     await ws.send(json.dumps(payload))
                     
-                    if time.time() - last_activity_time > 60:
+                    if time.time() - last_activity_time > 15:
                         print("\n[!] Watchdog: Reverting to local wake-word...")
                         while not input_queue.empty(): input_queue.get_nowait()
                         return 
@@ -152,9 +158,8 @@ async def start_gemini_session():
                                 with buffer_lock: output_buffer.extend(np.repeat(audio_fp32, OUT_RATIO).tolist())
                             if "text" in part: 
                                 text_out = part["text"].strip()
-                                # Suppress printing if it looks like a Google Search chain-of-thought block
-                                if not text_out.startswith("**"):
-                                    print(f"\n[Gemma]: {text_out}")
+                                print(f"\n[Gemma]: {text_out}", flush=True) 
+                            
 
             done, pending = await asyncio.wait(
                 [asyncio.create_task(send_loop()), asyncio.create_task(receive_loop())],
