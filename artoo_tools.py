@@ -4,16 +4,16 @@ import subprocess
 import time
 import re
 
-__version__ = "18.0.5"
+__version__ = "18.0.7"
 
 def local_artoo_executor(command):
     """
     Executes local system commands parsed from Gemma's tool calls.
-    Version: 18.0.5
+    Version: 18.0.7
     
     CHANGELOG:
-    - v18.0.5: Injected dynamic Python system time into the fallback prompt to cure temporal amnesia and ensure calendar commands sync to the correct day.
-    - v18.0.4: Injected `artoo_identity` prompt into the generic fallback to cure Stateless Amnesia, explicitly teaching Artoo to use `gcalcli` for calendar requests.
+    - v18.0.7: Injected gemma_stable_env/bin into the fallback PATH so Artoo can natively find python-installed executables like gcalcli without searching the disk.
+    - v18.0.6: Removed hardcoded calendar names. Instructed Artoo to explicitly read his MEMORY.md file to resolve calendar ownership before running gcalcli.
     
     This executor acts as a bridge between the cloud LLM and the local OS, 
     routing natural language intents into specific local hardware actions. 
@@ -120,14 +120,18 @@ def local_artoo_executor(command):
             cli_env["HOME"] = "/home/shane"
             cli_env["USER"] = "shane"
             
-            # THE FIX: Grab the live system time and inject it into the prompt
+            # THE FIX: Prepend the virtual environment bin to the PATH so gcalcli is natively found
+            venv_bin = "/home/shane/google-labs/gemma_stable_env/bin"
+            existing_path = cli_env.get("PATH", "")
+            cli_env["PATH"] = f"{venv_bin}:{existing_path}"
+            
             current_time = time.strftime('%A, %B %d, %Y at %I:%M %p')
             
             artoo_identity = (
                 f"You are Artoo, a local Linux shell assistant. "
                 f"CRITICAL TEMPORAL ANCHOR: The current system date and time is {current_time}. "
                 "If asked to check calendars, you MUST use the 'gcalcli' command-line tool. "
-                "Emily's calendar name contains 'Emily' (use 'gcalcli agenda --calendar Emily' to check it). "
+                "Read your MEMORY.md file to find the exact names of calendars before executing the query. "
                 "Do your best to execute this user request natively in the shell: "
             )
             
