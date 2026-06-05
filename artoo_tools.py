@@ -4,18 +4,16 @@ import subprocess
 import time
 import re
 
-__version__ = "18.0.3"
+__version__ = "18.0.5"
 
 def local_artoo_executor(command):
     """
     Executes local system commands parsed from Gemma's tool calls.
-    Version: 18.0.3
+    Version: 18.0.5
     
     CHANGELOG:
-    - v18.0.3: Injected HOME and USER variables into the fallback cli_env to prevent systemd from stripping Node.js CLI credentials (fixes calendar grep hallucination).
-    - v18.0.2: Broadened weight-logging regex to catch 'pounds' and 'lbs'. Updated hardcoded file path to '/home/shane/Documents/health_data/weight_tracker.txt'. Silenced stderr spam in the generic fallback block (DEVNULL) to prevent IDE connection crash loops.
-    - v18.0.1: Added regex-based local weight logging.
-    - v18.0.0: Initial extraction from main script. Supports Spotify, Timers, CLI execution, and fallback.
+    - v18.0.5: Injected dynamic Python system time into the fallback prompt to cure temporal amnesia and ensure calendar commands sync to the correct day.
+    - v18.0.4: Injected `artoo_identity` prompt into the generic fallback to cure Stateless Amnesia, explicitly teaching Artoo to use `gcalcli` for calendar requests.
     
     This executor acts as a bridge between the cloud LLM and the local OS, 
     routing natural language intents into specific local hardware actions. 
@@ -119,14 +117,25 @@ def local_artoo_executor(command):
         try:
             cli_env = os.environ.copy()
             cli_env["NODE_NO_WARNINGS"] = "1"
-            # THE FIX: Restore the user environment so the Node.js CLI can find its calendar/auth configs
             cli_env["HOME"] = "/home/shane"
             cli_env["USER"] = "shane"
             
+            # THE FIX: Grab the live system time and inject it into the prompt
+            current_time = time.strftime('%A, %B %d, %Y at %I:%M %p')
+            
+            artoo_identity = (
+                f"You are Artoo, a local Linux shell assistant. "
+                f"CRITICAL TEMPORAL ANCHOR: The current system date and time is {current_time}. "
+                "If asked to check calendars, you MUST use the 'gcalcli' command-line tool. "
+                "Emily's calendar name contains 'Emily' (use 'gcalcli agenda --calendar Emily' to check it). "
+                "Do your best to execute this user request natively in the shell: "
+            )
+            
+            enriched_command = artoo_identity + command
+
             result = subprocess.check_output(
-                ["gemini", "--model", "gemini-flash-lite-latest", "--approval-mode", "yolo", command], 
+                ["gemini", "--model", "gemini-flash-lite-latest", "--approval-mode", "yolo", enriched_command], 
                 text=True, 
-                # DEVNULL suppresses the VS Code IDE extension connection errors
                 stderr=subprocess.DEVNULL,
                 env=cli_env
             )

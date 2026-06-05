@@ -1,9 +1,9 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.0.8 Gemma Live: Modular Architecture Refactor ---
+# --- v18.0.9 Gemma Live: Modular Architecture Refactor ---
+# Change Message (v18.0.9):
+# - Added 'is_tool_running' state to dynamically extend the watchdog timer to 60s during Artoo executions, preventing premature cutoffs.
 # Change Message (v18.0.8):
 # - Bugfix: Wrapped local_artoo_executor in asyncio.to_thread() to prevent blocking OS calls from freezing the main asyncio loop and watchdog timer.
-# Change Message (v18.0.7):
-# - Changelog hygiene: Implemented a rolling 2-version comment history limit. 
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -34,6 +34,7 @@ output_buffer = []
 buffer_lock = threading.Lock()
 is_gemma_outputting_sound = False 
 last_activity_time = time.time()
+is_tool_running = False # Tracks if Artoo is busy
 
 oww_model = Model(wakeword_models=["models/hey_gemma.onnx"], inference_framework="onnx")
 
@@ -105,7 +106,7 @@ async def start_gemini_session():
             print("\n[LIVE] Session Active.")
 
             async def send_loop():
-                global last_activity_time
+                global last_activity_time, is_tool_running
                 while True:
                     indata = await input_queue.get()
                     downsampled = indata[::IN_RATIO]
@@ -121,13 +122,16 @@ async def start_gemini_session():
                     }
                     await ws.send(json.dumps(payload))
                     
-                    if time.time() - last_activity_time > 15:
-                        print("\n[!] Watchdog: Reverting to local wake-word...")
+                    # Dynamically adjust the timeout window based on Artoo's status
+                    timeout_limit = 60 if is_tool_running else 15
+                    
+                    if time.time() - last_activity_time > timeout_limit:
+                        print(f"\n[!] Watchdog: Timeout reached ({timeout_limit}s). Reverting to local wake-word...")
                         while not input_queue.empty(): input_queue.get_nowait()
                         return 
 
             async def receive_loop():
-                global last_activity_time
+                global last_activity_time, is_tool_running
                 async for message in ws:
                     msg = json.loads(message)
                     last_activity_time = time.time()
@@ -155,8 +159,14 @@ async def start_gemini_session():
                             else:
                                 subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
                                 
-                                # THE FIX: Offload the blocking OS execution to a background thread
+                                # Protect the loop by sending Artoo to a background thread
+                                print("[*] Waiting for Artoo to finish execution...")
+                                is_tool_running = True
                                 execution_result = await asyncio.to_thread(local_artoo_executor, cmd_args)
+                                is_tool_running = False
+                                
+                                # Reset the clock instantly after he finishes so the 15s timer starts fresh
+                                last_activity_time = time.time() 
                                 
                                 response_payload = {
                                     "toolResponse": {
