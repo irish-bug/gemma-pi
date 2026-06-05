@@ -4,14 +4,15 @@ import subprocess
 import time
 import re
 
-__version__ = "18.0.2"
+__version__ = "18.0.3"
 
 def local_artoo_executor(command):
     """
     Executes local system commands parsed from Gemma's tool calls.
-    Version: 18.0.2
+    Version: 18.0.3
     
     CHANGELOG:
+    - v18.0.3: Injected HOME and USER variables into the fallback cli_env to prevent systemd from stripping Node.js CLI credentials (fixes calendar grep hallucination).
     - v18.0.2: Broadened weight-logging regex to catch 'pounds' and 'lbs'. Updated hardcoded file path to '/home/shane/Documents/health_data/weight_tracker.txt'. Silenced stderr spam in the generic fallback block (DEVNULL) to prevent IDE connection crash loops.
     - v18.0.1: Added regex-based local weight logging.
     - v18.0.0: Initial extraction from main script. Supports Spotify, Timers, CLI execution, and fallback.
@@ -118,6 +119,9 @@ def local_artoo_executor(command):
         try:
             cli_env = os.environ.copy()
             cli_env["NODE_NO_WARNINGS"] = "1"
+            # THE FIX: Restore the user environment so the Node.js CLI can find its calendar/auth configs
+            cli_env["HOME"] = "/home/shane"
+            cli_env["USER"] = "shane"
             
             result = subprocess.check_output(
                 ["gemini", "--model", "gemini-flash-lite-latest", "--approval-mode", "yolo", command], 

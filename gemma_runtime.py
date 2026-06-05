@@ -1,18 +1,9 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.0.5 Gemma Live: Modular Architecture Refactor ---
-# Change Message (v18.0.5):
-# - Security Update: Stripped hardcoded PII and location data. user_context is now pulled dynamically from the local .env file.
-# Change Message (v18.0.4):
-# - Added 'end_live_session' tool to allow Gemma to cleanly sever the websocket connection.
-# - Imported 'handle_end_session' from gemma_tools to intercept sleep commands locally.
-# - Updated system prompts to guide Gemma to use the sleep tool.
-# Change Message (v18.0.3):
-# - Removed Markdown filter and added flush=True to capture internal monologue in systemd logs.
-# - Reduced watchdog timeout to 15s.
-# Change Message (v18.0.2):
-# - Reduced timeout to 15s of silence and fixed interaction logging to write to the activity log.
-# Change Message (v18.0.1):
-# - Structural Refactor: Extracted local_artoo_executor into artoo_tools.py.
+# --- v18.0.8 Gemma Live: Modular Architecture Refactor ---
+# Change Message (v18.0.8):
+# - Bugfix: Wrapped local_artoo_executor in asyncio.to_thread() to prevent blocking OS calls from freezing the main asyncio loop and watchdog timer.
+# Change Message (v18.0.7):
+# - Changelog hygiene: Implemented a rolling 2-version comment history limit. 
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -83,7 +74,7 @@ async def start_gemini_session():
                     },
                     "systemInstruction": {
                         "parts": [{
-                            "text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, set a timer, execute a Linux shell command, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. CRITICAL: If the user asks for a system command (like checking disk space, appending data to a text file, restarting a service), you MUST translate their intent into a raw Linux Bash command and prefix it with 'cli:' (e.g., 'cli: df -h'). Do not output markdown text headers or text explanations of your thoughts. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result. If the user says goodbye or tells you to go to sleep, say a brief goodbye and then immediately call the 'end_live_session' tool."
+                            "text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, set a timer, execute a Linux shell command, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. CRITICAL: If the user asks for a system command (like checking disk space, appending data to a text file, restarting a service), you MUST translate their intent into a raw Linux Bash command and prefix it with 'cli:' (e.g., 'cli: df -h'). Do not output markdown text headers or text explanations of your thoughts. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result. CRITICAL OVERRIDE: If the user says goodbye, 'go to bed', or tells you to go to sleep, NEVER use the 'run_artoo_cmd' tool. You MUST exclusively trigger the 'end_live_session' tool."
                         }]
                     },
                     "tools": [{
@@ -146,8 +137,13 @@ async def start_gemini_session():
                         for fc in function_calls:
                             call_id = fc.get("id")
                             func_name = fc.get("name")
+                            cmd_args = fc.get("args", {}).get("command", "")
                             
-                            print(f"\n🔧 [TOOL CALL] Gemma invoked '{func_name}'")
+                            # Log the exact string to expose hallucinations
+                            if cmd_args:
+                                print(f"\n🔧 [TOOL CALL] Gemma invoked '{func_name}' with string: '{cmd_args}'")
+                            else:
+                                print(f"\n🔧 [TOOL CALL] Gemma invoked '{func_name}'")
                             
                             # 1. Intercept Gemma's internal session commands
                             if func_name == "end_live_session":
@@ -157,9 +153,10 @@ async def start_gemini_session():
 
                             # 2. Standard Artoo OS Execution
                             else:
-                                cmd_args = fc.get("args", {}).get("command", "")
                                 subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
-                                execution_result = local_artoo_executor(cmd_args)
+                                
+                                # THE FIX: Offload the blocking OS execution to a background thread
+                                execution_result = await asyncio.to_thread(local_artoo_executor, cmd_args)
                                 
                                 response_payload = {
                                     "toolResponse": {
