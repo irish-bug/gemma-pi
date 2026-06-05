@@ -1,10 +1,18 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.0.2 Gemma Live: Modular Architecture Refactor ---
+# --- v18.0.5 Gemma Live: Modular Architecture Refactor ---
+# Change Message (v18.0.5):
+# - Security Update: Stripped hardcoded PII and location data. user_context is now pulled dynamically from the local .env file.
+# Change Message (v18.0.4):
+# - Added 'end_live_session' tool to allow Gemma to cleanly sever the websocket connection.
+# - Imported 'handle_end_session' from gemma_tools to intercept sleep commands locally.
+# - Updated system prompts to guide Gemma to use the sleep tool.
+# Change Message (v18.0.3):
+# - Removed Markdown filter and added flush=True to capture internal monologue in systemd logs.
+# - Reduced watchdog timeout to 15s.
 # Change Message (v18.0.2):
-# Reduce timeout to 15s of silence and fixed interaction logging to write to the activity log.
+# - Reduced timeout to 15s of silence and fixed interaction logging to write to the activity log.
 # Change Message (v18.0.1):
-# - Structural Refactor: Extracted `local_artoo_executor` into a standalone `artoo_tools.py` module to cleanly separate the websocket/audio streaming engine from OS-level tool executions. 
-# - Carried over all context tweaks (186 Pinto St, 0.85 threshold, 5s cooldown, cli execution capabilities).
+# - Structural Refactor: Extracted local_artoo_executor into artoo_tools.py.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -15,11 +23,11 @@ os.environ["ORT_LOG_SEVERITY_LEVEL"] = "3"
 import onnxruntime as ort
 from openwakeword.model import Model
 
-# IMPORT THE NEW TOOLBOX
+# IMPORT THE NEW TOOLBOXES
 from artoo_tools import local_artoo_executor
+from gemma_tools import handle_end_session
 
 # --- 1. CONFIG ---
-# This line is kept for legacy purposes, but the os.environ above is more reliable
 ort.set_default_logger_severity(3)
 
 API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
@@ -61,7 +69,8 @@ async def start_gemini_session():
     last_activity_time = time.time()
     uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
     
-    user_context = "User is Shane. Location is 186 Pinto St. Golden, Colorado. Timezone is MDT."
+    # Securely load personal context from the .env file instead of hardcoding PII
+    user_context = os.environ.get("USER_CONTEXT", "User is a human interacting via voice.")
     
     try:
         async with websockets.connect(uri) as ws:
@@ -74,21 +83,28 @@ async def start_gemini_session():
                     },
                     "systemInstruction": {
                         "parts": [{
-                            "text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, set a timer, execute a Linux shell command, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. CRITICAL: If the user asks for a system command (like checking disk space, appending data to a text file, restarting a service), you MUST translate their intent into a raw Linux Bash command and prefix it with 'cli:' (e.g., 'cli: df -h'). Do not output markdown text headers or text explanations of your thoughts. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result."
+                            "text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, set a timer, execute a Linux shell command, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. CRITICAL: If the user asks for a system command (like checking disk space, appending data to a text file, restarting a service), you MUST translate their intent into a raw Linux Bash command and prefix it with 'cli:' (e.g., 'cli: df -h'). Do not output markdown text headers or text explanations of your thoughts. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result. If the user says goodbye or tells you to go to sleep, say a brief goodbye and then immediately call the 'end_live_session' tool."
                         }]
                     },
                     "tools": [{
-                        "functionDeclarations": [{
-                            "name": "run_artoo_cmd", 
-                            "description": "Run lab commands, control Spotify, set a timer, or execute raw Bash CLI commands. For timers, output exactly 'timer [seconds]'. For Linux shell commands, translate the user's intent into bash and output exactly 'cli: [raw bash command]'.", 
-                            "parameters": {
-                                "type": "object", 
-                                "properties": {
-                                    "command": {"type": "string"}
-                                }, 
-                                "required": ["command"]
+                        "functionDeclarations": [
+                            {
+                                "name": "run_artoo_cmd", 
+                                "description": "Run lab commands, control Spotify, set a timer, or execute raw Bash CLI commands. For timers, output exactly 'timer [seconds]'. For Linux shell commands, translate the user's intent into bash and output exactly 'cli: [raw bash command]'.", 
+                                "parameters": {
+                                    "type": "object", 
+                                    "properties": {
+                                        "command": {"type": "string"}
+                                    }, 
+                                    "required": ["command"]
+                                }
+                            },
+                            {
+                                "name": "end_live_session",
+                                "description": "Call this tool immediately when the user says goodbye, go to sleep, stop listening, or indicates the conversation is over.",
+                                "parameters": {"type": "object", "properties": {}}
                             }
-                        }]},
+                        ]},
                         {"googleSearch": {}}
                     ]
                 }
@@ -130,24 +146,32 @@ async def start_gemini_session():
                         for fc in function_calls:
                             call_id = fc.get("id")
                             func_name = fc.get("name")
-                            cmd_args = fc.get("args", {}).get("command", "")
                             
-                            print(f"\n🔧 [TOOL CALL] Gemma invoked '{func_name}' with string: '{cmd_args}'")
+                            print(f"\n🔧 [TOOL CALL] Gemma invoked '{func_name}'")
                             
-                            subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
-                            execution_result = local_artoo_executor(cmd_args)
-                            
-                            response_payload = {
-                                "toolResponse": {
-                                    "functionResponses": [{
-                                        "id": call_id,
-                                        "name": func_name,
-                                        "response": {"result": execution_result}
-                                    }]
+                            # 1. Intercept Gemma's internal session commands
+                            if func_name == "end_live_session":
+                                should_disconnect = await handle_end_session(input_queue)
+                                if should_disconnect:
+                                    return # Breaks the websocket loop, falling back to wake-word
+
+                            # 2. Standard Artoo OS Execution
+                            else:
+                                cmd_args = fc.get("args", {}).get("command", "")
+                                subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
+                                execution_result = local_artoo_executor(cmd_args)
+                                
+                                response_payload = {
+                                    "toolResponse": {
+                                        "functionResponses": [{
+                                            "id": call_id,
+                                            "name": func_name,
+                                            "response": {"result": execution_result}
+                                        }]
+                                    }
                                 }
-                            }
-                            await ws.send(json.dumps(response_payload))
-                            print(f"📡 [TOOL RESPONSE] Sent execution token back to cloud.")
+                                await ws.send(json.dumps(response_payload))
+                                print(f"📡 [TOOL RESPONSE] Sent execution token back to cloud.")
 
                     if "serverContent" in msg:
                         parts = msg["serverContent"].get("modelTurn", {}).get("parts", [])
@@ -184,7 +208,7 @@ async def main():
                 indata = await input_queue.get()
                 prediction = oww_model.predict((indata[::IN_RATIO] * 32767).astype(np.int16).flatten())
                 
-                # BUMPED THRESHOLD: 0.85 prevents ghost triggers
+                # Lowered THRESHOLD: 0.70 because better trained to my voice now
                 if prediction["hey_gemma"] > 0.70:
                     print("\n[!] Wake Word Detected!")
                     
