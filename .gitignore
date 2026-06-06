@@ -23,3 +23,6 @@ gemma_stable_env/
 artoo_ops.log
 *.log
 __pycache__/
+old/
+memory/
+HOME_ASSISTANT.md
