@@ -1,9 +1,8 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.2.0 Gemma Live: Spatial Multi-Node Audio ---
-# Change Message (v18.2.0):
-# - Implemented explicit spatial audio routing via isolated node tracking.
-# - Instantiated separate OpenWakeWord instances to prevent multi-room buffer cross-contamination.
-# - Gated tool acknowledgment tones and API Text-to-Speech output to play exclusively on the triggering node.
+# --- v18.2.2 Gemma Live: Spatial Multi-Node Audio (Network Buffer Fix) ---
+# Change Message (v18.2.2):
+# - Fixed Satellite Insensitivity: Implemented a 1280-sample accumulation buffer for the TCP stream.
+# - Optimized Wake Word Pipeline: Removed redundant float-to-int conversions in the background listener loops.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -24,7 +23,7 @@ from gemma_tools import handle_end_session
 ort.set_default_logger_severity(3)
 
 API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
-MODEL = "10"
+MODEL = "gemini-2.5-flash-native-audio-latest"
 VOICE = "Aoede"
 
 HW_FS, API_IN_FS, API_OUT_FS = 48000, 16000, 24000
@@ -33,7 +32,7 @@ MIC_BOOST, OUT_BOOST = 8.0, 1.2
 
 input_queue = asyncio.Queue()
 local_mic_queue = asyncio.Queue()
-output_buffer = []
+output_buffer = np.array([], dtype=np.float32) 
 buffer_lock = threading.Lock()
 
 is_gemma_outputting_sound = False 
@@ -43,21 +42,24 @@ active_node = None # Global spatial tracker: "local" or "satellite"
 
 # --- 2. LOCAL ANKER HANDLERS ---
 def mic_callback(indata, frames, time_info, status):
-    if not is_gemma_outputting_sound:
-        # Constantly pipe local hardware frames to the local processor queue
-        downsampled = indata[::IN_RATIO].copy()
-        loop.call_soon_threadsafe(local_mic_queue.put_nowait, downsampled)
+    downsampled = indata[::IN_RATIO].copy()
+    if is_gemma_outputting_sound:
+        downsampled.fill(0.0) 
+    loop.call_soon_threadsafe(local_mic_queue.put_nowait, downsampled)
 
 def spk_callback(outdata, frames, time_info, status):
     global output_buffer, is_gemma_outputting_sound
     with buffer_lock:
-        if len(output_buffer) >= frames:
-            chunk = np.array(output_buffer[:frames], dtype=np.float32)
-            outdata[:, 0] = np.clip(chunk * OUT_BOOST, -1.0, 1.0)
-            output_buffer = output_buffer[frames:]
-            is_gemma_outputting_sound = np.max(np.abs(chunk)) > 0.01
+        if len(output_buffer) > 0:
+            take = min(len(output_buffer), frames)
+            outdata[:take, 0] = np.clip(output_buffer[:take] * OUT_BOOST, -1.0, 1.0)
+            if take < frames:
+                outdata[take:, 0] = 0 
+            output_buffer = output_buffer[take:]
+            is_gemma_outputting_sound = True
         else:
-            outdata.fill(0); is_gemma_outputting_sound = False 
+            outdata.fill(0)
+            is_gemma_outputting_sound = False 
 
 # --- 3. THE LIVE BRAIN ---
 async def start_gemini_session(satellite_client):
@@ -122,6 +124,9 @@ async def start_gemini_session(satellite_client):
                     }
                     await ws.send(json.dumps(payload))
                     
+                    if is_gemma_outputting_sound:
+                        last_activity_time = time.time()
+                        
                     timeout_limit = 60 if is_tool_running else 15
                     if time.time() - last_activity_time > timeout_limit:
                         print(f"\n[!] Watchdog: Timeout reached ({timeout_limit}s). Reverting to local wake-word...")
@@ -178,15 +183,15 @@ async def start_gemini_session(satellite_client):
                             if "inlineData" in part:
                                 raw = base64.b64decode(part["inlineData"]["data"])
                                 
-                                # SPATIAL ROUTING: Output ONLY to the active node that initiated the session
                                 if active_node == "satellite":
                                     chunk = AudioChunk(rate=API_OUT_FS, width=2, channels=1, audio=raw)
                                     await satellite_client.write_event(chunk.event())
                                     
                                 elif active_node == "local":
                                     audio_fp32 = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0
+                                    audio_up = np.repeat(audio_fp32, OUT_RATIO)
                                     with buffer_lock: 
-                                        output_buffer.extend(np.repeat(audio_fp32, OUT_RATIO).tolist())
+                                        output_buffer = np.concatenate((output_buffer, audio_up))
                                 
                             if "text" in part: 
                                 text_out = part["text"].strip()
@@ -208,7 +213,6 @@ async def main():
     loop = asyncio.get_running_loop()
     satellite_uri = "tcp://192.168.1.213:10700"
     
-    # Isolated instances maintain unique buffer trees to prevent multi-room cross-talk anomalies
     local_oww = Model(wakeword_models=["models/hey_gemma.onnx"], inference_framework="onnx")
     satellite_oww = Model(wakeword_models=["models/hey_gemma.onnx"], inference_framework="onnx")
     
@@ -246,14 +250,13 @@ async def main():
                     print(f"[*] Listener re-armed. Released source lock from: [{active_node}]")
                     active_node = None
 
-                # Isolated Background Processing Loops
                 async def local_listener():
                     global active_node
                     while True:
                         indata = await local_mic_queue.get()
                         if active_node == "local":
                             await input_queue.put(indata)
-                        elif active_node is None:
+                        elif active_node is None and not is_gemma_outputting_sound:
                             prediction = local_oww.predict((indata * 32767).astype(np.int16).flatten())
                             if prediction["hey_gemma"] > 0.70:
                                 active_node = "local"
@@ -261,19 +264,33 @@ async def main():
 
                 async def satellite_listener():
                     global active_node, is_gemma_outputting_sound
+                    satellite_buffer = np.array([], dtype=np.int16)
                     while True:
                         event = await satellite_client.read_event()
                         if event and AudioChunk.is_type(event.type):
                             chunk = AudioChunk.from_event(event)
-                            audio_fp32 = np.frombuffer(chunk.audio, dtype=np.int16).astype(np.float32) / 32767.0
+                            audio_int16 = np.frombuffer(chunk.audio, dtype=np.int16)
                             
                             if active_node == "satellite":
+                                audio_fp32 = audio_int16.astype(np.float32) / 32767.0
+                                if is_gemma_outputting_sound:
+                                    audio_fp32.fill(0.0)
                                 await input_queue.put(audio_fp32.reshape(-1, 1))
                             elif active_node is None and not is_gemma_outputting_sound:
-                                prediction = satellite_oww.predict((audio_fp32 * 32767).astype(np.int16).flatten())
-                                if prediction["hey_gemma"] > 0.70:
-                                    active_node = "satellite"
-                                    loop.create_task(run_session_flow())
+                                # Accumulate tiny TCP network packets into contiguous chunks
+                                satellite_buffer = np.concatenate((satellite_buffer, audio_int16))
+                                
+                                # Process exact 1280-sample (80ms) frames for proper feature boundary mapping
+                                while len(satellite_buffer) >= 1280:
+                                    frame = satellite_buffer[:1280]
+                                    satellite_buffer = satellite_buffer[1280:]
+                                    
+                                    prediction = satellite_oww.predict(frame)
+                                    if prediction["hey_gemma"] > 0.70:
+                                        active_node = "satellite"
+                                        loop.create_task(run_session_flow())
+                                        satellite_buffer = np.array([], dtype=np.int16)
+                                        break
 
                 asyncio.create_task(local_listener())
                 asyncio.create_task(satellite_listener())
