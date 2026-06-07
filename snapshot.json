@@ -1,0 +1,150 @@
+{
+    "timestamp": 1780775601.10749,
+    "devices": [
+        {
+            "id": "ebbf7b1447c02d8bf9ahaf",
+            "ip": "192.168.1.166",
+            "active": 2,
+            "encrypt": true,
+            "productKey": "keyyepxwk9my9esq",
+            "name": "work light",
+            "key": "862cd58b7502f4a4",
+            "mac": "cc:8c:bf:67:83:a1",
+            "ability": 0,
+            "token": "",
+            "wf_cfg": "",
+            "dev_type": "default",
+            "err": "",
+            "type": "default",
+            "dps": {
+                "dps": {
+                    "20": false,
+                    "21": "white",
+                    "22": 500,
+                    "23": 1000,
+                    "24": "000003e803e8",
+                    "26": 0,
+                    "34": false
+                }
+            },
+            "origin": "broadcast",
+            "ver": "3.3"
+        },
+        {
+            "id": "ebdd2ffa8e3c603f88nuz9",
+            "ip": "192.168.1.198",
+            "active": 2,
+            "encrypt": true,
+            "productKey": "keyyepxwk9my9esq",
+            "name": "hallway light",
+            "key": "T'>!xT^fja&27Q)R",
+            "mac": "cc:8c:bf:be:7d:4f",
+            "ability": 0,
+            "token": "",
+            "wf_cfg": "",
+            "dev_type": "default",
+            "err": "",
+            "type": "default",
+            "dps": {
+                "dps": {
+                    "20": true,
+                    "21": "white",
+                    "22": 500,
+                    "23": 1000,
+                    "24": "000003e803e8",
+                    "26": 0,
+                    "34": false
+                }
+            },
+            "origin": "broadcast",
+            "ver": "3.3"
+        },
+        {
+            "id": "eb2ff2e972a787c4e65hkb",
+            "ip": "192.168.1.197",
+            "active": 2,
+            "encrypt": true,
+            "productKey": "keyyepxwk9my9esq",
+            "name": "laundry light",
+            "key": "de743f0bad210f1e",
+            "mac": "cc:8c:bf:67:88:3f",
+            "ability": 0,
+            "token": "",
+            "wf_cfg": "",
+            "dev_type": "default",
+            "err": "",
+            "type": "default",
+            "dps": {
+                "dps": {
+                    "20": true,
+                    "21": "white",
+                    "22": 750,
+                    "23": 672,
+                    "24": "00ff00e703e8",
+                    "26": 0,
+                    "34": false
+                }
+            },
+            "origin": "broadcast",
+            "ver": "3.3"
+        },
+        {
+            "id": "ebcc75ea6c7c660fd7qahk",
+            "ip": "192.168.1.192",
+            "active": 2,
+            "encrypt": true,
+            "productKey": "keyyepxwk9my9esq",
+            "name": "bathroom light",
+            "key": "kJnlsm*|aP(`1B][",
+            "mac": "cc:8c:bf:bf:13:e1",
+            "ability": 0,
+            "token": "",
+            "wf_cfg": "",
+            "dev_type": "default",
+            "err": "",
+            "type": "default",
+            "dps": {
+                "dps": {
+                    "20": true,
+                    "21": "white",
+                    "22": 1000,
+                    "23": 1000,
+                    "24": "000003e803e8",
+                    "26": 0,
+                    "34": false
+                }
+            },
+            "origin": "broadcast",
+            "ver": "3.3"
+        },
+        {
+            "id": "ebc4d62dc479483b771qdx",
+            "ip": "192.168.1.200",
+            "active": 2,
+            "encrypt": true,
+            "productKey": "keyyepxwk9my9esq",
+            "name": "spare room light",
+            "key": "8258ae7620104df2",
+            "mac": "cc:8c:bf:dc:a4:6c",
+            "ability": 0,
+            "token": "",
+            "wf_cfg": "",
+            "dev_type": "default",
+            "err": "",
+            "type": "default",
+            "dps": {
+                "dps": {
+                    "20": true,
+                    "21": "white",
+                    "22": 1000,
+                    "23": 598,
+                    "24": "00f9000003e8",
+                    "26": 0,
+                    "34": false
+                }
+            },
+            "origin": "broadcast",
+            "ver": "3.3"
+        }
+    ]
+}
