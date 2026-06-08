@@ -1,15 +1,15 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.2.5 Gemma Live: Spatial Multi-Node Audio (Pipeline Trigger Patch) ---
-# Change Message (v18.2.5):
-# - Imported wyoming Event class to manually construct protocol handshakes.
-# - Fixed AudioStart sample rate to 24000 to match remote aplay expectation.
-# - Sent explicit run-pipeline event to force the satellite out of standby and transmit mic chunks.
+# --- v18.2.7 Gemma Live: Spatial Multi-Node Audio (Pipeline Trigger Patch) ---
+# Change Message (v18.2.7):
+# - Removed hallucinated `WakeUp` and manual `Event` imports.
+# - Imported official `RunPipeline` and `PipelineStage` classes from `wyoming.pipeline`.
+# - Structured the formal Wyoming pipeline handshake to force the satellite out of standby and release the 16kHz mic stream.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
 from wyoming.client import AsyncClient
 from wyoming.audio import AudioChunk, AudioStart
-from wyoming.event import Event # <-- New import for protocol handshake
+from wyoming.pipeline import RunPipeline, PipelineStage # <-- Official Wyoming pipeline data classes
 import sounddevice as sd
 
 os.environ["ORT_LOG_SEVERITY_LEVEL"] = "3"
@@ -156,7 +156,12 @@ async def main():
                 await satellite_client.write_event(AudioStart(rate=24000, width=2, channels=1).event())
                 
                 # 2. THE FIX: Command satellite to run pipeline, forcing mic stream open!
-                await satellite_client.write_event(Event(type="run-pipeline", data={"start_stage": "wake_word", "end_stage": "tts"}))
+                await satellite_client.write_event(
+                    RunPipeline(
+                        start_stage=PipelineStage.WAKE,
+                        end_stage=PipelineStage.TTS
+                    ).event()
+                )
                 
                 print(f"[*] Gemma Listening (Anker S500 + Satellite Node)...")
                 active_node = None
@@ -165,7 +170,12 @@ async def main():
                     global is_gemma_outputting_sound, active_node
                     print(f"\n[!] Wake Word Locked on Node: [{active_node.upper()}]")
                     is_gemma_outputting_sound = True
-                    if active_node == "local": subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
+                    if active_node == "local": 
+                        subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
+                    elif active_node == "satellite":
+                        # Play acknowledgement via satellite
+                        chat_wav = np.fromfile("/home/shane/google-labs/audio/chat.wav", dtype=np.int16)[22:] # basic wav header skip
+                        await satellite_client.write_event(AudioChunk(rate=24000, width=2, channels=1, audio=chat_wav.tobytes()).event())
                     is_gemma_outputting_sound = False
                     
                     while not input_queue.empty(): input_queue.get_nowait()

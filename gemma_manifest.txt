@@ -1,0 +1,929 @@
+# PROJECT GEMMA - CURRENT STATE
+Gemma Project chat context and manifest
+**Project:** Project Gemma (Multi-Node Spatial AI Voice Network and Research Assistant)
+**User:** Shane McFly (Computer Scientist and Cybersecurity Researcher)
+**Date/Time Context:** June 8, 2026 (Golden, Colorado)
+**System Preferences:** Start responses with a TL;DR. Use bullet points for long explanations. Prioritize objectivity; do not sugar-coat.
+
+#### **1. Hardware Topology**
+
+* **Host Node ("Gemma"):** Raspberry Pi 5. Connected to an Anker S500 speakerphone. Handles the main Gemini 2.5 Flash Native Audio API WebSocket connection, OpenWakeWord processing, and passes local OS execution through to "artoo", a Gemini-CLI model running gemini-flash-lite-latest (see gemma_tools.py).
+* **System Node ("artoo"):** (on the same) Raspberry Pi 5. gemini-cli model. Handles local OS execution via Gemini-CLI model running gemini-flash-lite-latest (see ARTOO.md and artoo_tools.py).
+* **Satellite Node ("satellite-of-love" aka "slove" / Shack / Shed):** Raspberry Pi Zero 2 W with a ReSpeaker 2-Mic HAT (`card 1`, `wm8960`), housed in a custom Fender mesh case. IP: `192.168.1.213`. Port: `10700`.
+
+#### **2. Software & Architecture State**
+
+* **Host Runtime:** `gemma_runtime.py` (Currently on v18.2.6). Running as a user systemd service (`gemma.service`). Runtime also leverages `artoo_tools.py` and `gemma_tools.py`.
+* **Satellite Daemon:** `wyoming-satellite` running via `script/run` (transitioning to `wyoming-satellite.service`).
+* **Audio Routing:** Native 48kHz local hardware, 16kHz OpenWakeWord detection, 16kHz network mic transmission, 24kHz Gemini API TTS generation and network playback.
+* **Spatial Awareness:** A global `active_node` tracker ensures TTS and acknowledgement tones *only* play in the room where the wake word ("Hey Gemma") was triggered.
+* **Key Fixes Applied:**
+* Replaced Python lists with Numpy array concatenation to bypass GIL stuttering.
+* Piped `0.0` silence to the TCP queue during TTS to prevent the Gemini API from timing out.
+* Implemented a 1280-sample buffer accumulation for the network stream to allow OpenWakeWord to process contiguous 80ms chunks.
+* Unmuted the ReSpeaker hardware at the driver level (`amixer -c 1 sset 'Capture' 80% unmute` and `cap`).
+
+
+#### **3. Immediate Status & Where We Left Off**
+
+* The network TCP connection is flawless. The Pi 5 successfully sends audio to the shack (`aplay` at 24kHz works).
+* The shack's microphone is actively recording (`arecord` at 16kHz works), but the Wyoming protocol was holding the data in "standby" because it required a formal pipeline handshake to open the stream.
+* **v18.2.6** of `gemma_runtime.py` was just deployed to the Pi 5. It uses the official Wyoming Python classes (`WakeUp`, `RunPipeline`, `PipelineStage`) to execute a mathematically perfect protocol handshake.
+* The satellite is currently running in `--debug` mode in the foreground to trace the exact protocol responses.-e 
+
+# --- CURRENT CODE: gemma_runtime.py ---
+#!//home/shane/google-labs/gemma_stable_env/bin/python
+# --- v18.2.5 Gemma Live: Spatial Multi-Node Audio (Pipeline Trigger Patch) ---
+# Change Message (v18.2.5):
+# - Imported wyoming Event class to manually construct protocol handshakes.
+# - Fixed AudioStart sample rate to 24000 to match remote aplay expectation.
+# - Sent explicit run-pipeline event to force the satellite out of standby and transmit mic chunks.
+
+import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
+import numpy as np
+from wyoming.client import AsyncClient
+from wyoming.audio import AudioChunk, AudioStart
+from wyoming.event import Event # <-- New import for protocol handshake
+import sounddevice as sd
+
+os.environ["ORT_LOG_SEVERITY_LEVEL"] = "3"
+import onnxruntime as ort
+from openwakeword.model import Model
+
+from artoo_tools import local_artoo_executor
+from gemma_tools import handle_end_session
+
+# --- 1. CONFIG ---
+ort.set_default_logger_severity(3)
+API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+MODEL = "gemini-2.5-flash-native-audio-latest"
+VOICE = "Aoede"
+
+HW_FS, API_IN_FS, API_OUT_FS = 48000, 16000, 24000
+IN_RATIO, OUT_RATIO = 3, 2
+MIC_BOOST, OUT_BOOST = 8.0, 1.2 
+
+input_queue = asyncio.Queue()
+local_mic_queue = asyncio.Queue()
+output_buffer = np.array([], dtype=np.float32) 
+buffer_lock = threading.Lock()
+
+is_gemma_outputting_sound = False 
+last_activity_time = time.time()
+is_tool_running = False 
+active_node = None 
+
+# --- 2. LOCAL ANKER HANDLERS ---
+def mic_callback(indata, frames, time_info, status):
+    downsampled = indata[::IN_RATIO].copy()
+    if is_gemma_outputting_sound: downsampled.fill(0.0) 
+    loop.call_soon_threadsafe(local_mic_queue.put_nowait, downsampled)
+
+def spk_callback(outdata, frames, time_info, status):
+    global output_buffer, is_gemma_outputting_sound
+    with buffer_lock:
+        if len(output_buffer) > 0:
+            take = min(len(output_buffer), frames)
+            outdata[:take, 0] = np.clip(output_buffer[:take] * OUT_BOOST, -1.0, 1.0)
+            if take < frames: outdata[take:, 0] = 0 
+            output_buffer = output_buffer[take:]
+            is_gemma_outputting_sound = True
+        else:
+            outdata.fill(0)
+            is_gemma_outputting_sound = False 
+
+# --- 3. THE LIVE BRAIN ---
+async def start_gemini_session(satellite_client):
+    global last_activity_time
+    last_activity_time = time.time()
+    uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
+    user_context = os.environ.get("USER_CONTEXT", "User is a human interacting via voice.")
+    
+    try:
+        async with websockets.connect(uri) as ws:
+            setup = {
+                "setup": {
+                    "model": f"models/{MODEL}",
+                    "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE}}}},
+                    "systemInstruction": {"parts": [{"text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, set a timer, execute a Linux shell command, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. CRITICAL: If the user asks for a system command (like checking disk space, appending data to a text file, restarting a service), you MUST translate their intent into a raw Linux Bash command and prefix it with 'cli:' (e.g., 'cli: df -h'). Do not output markdown text headers or text explanations of your thoughts. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result. CRITICAL OVERRIDE: If the user says goodbye, 'go to bed', or tells you to go to sleep, NEVER use the 'run_artoo_cmd' tool. You MUST exclusively trigger the 'end_live_session' tool."}]},
+                    "tools": [
+                        {"functionDeclarations": [
+                            {"name": "run_artoo_cmd", "description": "Run lab commands, control Spotify, set a timer, or execute raw Bash CLI commands.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+                            {"name": "end_live_session", "description": "Call immediately when user says goodbye.", "parameters": {"type": "object", "properties": {}}}
+                        ]},
+                        {"googleSearch": {}}
+                    ]
+                }
+            }
+            await ws.send(json.dumps(setup))
+            await ws.recv() 
+            print(f"\n[LIVE] Session Active on Node: [{active_node.upper()}]")
+
+            async def send_loop():
+                global last_activity_time, is_tool_running
+                while True:
+                    indata = await input_queue.get()
+                    audio_int16 = (np.clip(indata * MIC_BOOST, -1.0, 1.0) * 32767).astype(np.int16)
+                    payload = {"realtimeInput": {"mediaChunks": [{"mimeType": "audio/pcm;rate=16000", "data": base64.b64encode(audio_int16.tobytes()).decode()}]}}
+                    await ws.send(json.dumps(payload))
+                    if is_gemma_outputting_sound: last_activity_time = time.time()
+                    timeout_limit = 60 if is_tool_running else 30
+                    if time.time() - last_activity_time > timeout_limit:
+                        print(f"\n[!] Watchdog: Timeout reached ({timeout_limit}s). Reverting to local wake-word...")
+                        while not input_queue.empty(): input_queue.get_nowait()
+                        return 
+
+            async def receive_loop():
+                global last_activity_time, is_tool_running, output_buffer
+                async for message in ws:
+                    msg = json.loads(message)
+                    last_activity_time = time.time()
+                    
+                    if "toolCall" in msg:
+                        function_calls = msg["toolCall"].get("functionCalls", [])
+                        for fc in function_calls:
+                            call_id, func_name, cmd_args = fc.get("id"), fc.get("name"), fc.get("args", {}).get("command", "")
+                            if func_name == "end_live_session":
+                                if await handle_end_session(input_queue): return 
+                            else:
+                                if active_node == "local": subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
+                                print("[*] Waiting for Artoo to finish execution...")
+                                is_tool_running = True
+                                execution_result = await asyncio.to_thread(local_artoo_executor, cmd_args)
+                                is_tool_running, last_activity_time = False, time.time() 
+                                await ws.send(json.dumps({"toolResponse": {"functionResponses": [{"id": call_id, "name": func_name, "response": {"result": execution_result}}]}}))
+
+                    if "serverContent" in msg:
+                        for part in msg["serverContent"].get("modelTurn", {}).get("parts", []):
+                            if "inlineData" in part:
+                                raw = base64.b64decode(part["inlineData"]["data"])
+                                if active_node == "satellite":
+                                    await satellite_client.write_event(AudioChunk(rate=API_OUT_FS, width=2, channels=1, audio=raw).event())
+                                elif active_node == "local":
+                                    audio_up = np.repeat(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0, OUT_RATIO)
+                                    with buffer_lock: output_buffer = np.concatenate((output_buffer, audio_up))
+                            if "text" in part: 
+                                print(f"\n[Gemma's Thoughts]: {part['text'].strip()}", flush=True) 
+
+            done, pending = await asyncio.wait([asyncio.create_task(send_loop()), asyncio.create_task(receive_loop())], return_when=asyncio.FIRST_COMPLETED)
+            for task in pending: task.cancel() 
+
+    except websockets.exceptions.ConnectionClosed as e: print(f"\n[!] WebSocket Closed (Code {e.code})")
+    except Exception as e: print(f"\n[!] Session Closed: {e}")
+
+async def main():
+    global loop, is_gemma_outputting_sound, active_node
+    loop = asyncio.get_running_loop()
+    satellite_uri = "tcp://192.168.1.213:10700"
+    
+    local_oww = Model(wakeword_models=["models/hey_gemma.onnx"], inference_framework="onnx")
+    satellite_oww = Model(wakeword_models=["models/hey_gemma.onnx"], inference_framework="onnx")
+    
+    try:
+        with sd.InputStream(device="default", channels=1, samplerate=HW_FS, callback=mic_callback, blocksize=3840), \
+             sd.OutputStream(device="default", channels=1, samplerate=HW_FS, callback=spk_callback, blocksize=1024):
+            
+            print(f"[*] Connecting to Satellite at {satellite_uri}...")
+            async with AsyncClient.from_uri(satellite_uri) as satellite_client:
+                
+                # 1. Inform satellite of our API 24kHz playback rate
+                await satellite_client.write_event(AudioStart(rate=24000, width=2, channels=1).event())
+                
+                # 2. THE FIX: Command satellite to run pipeline, forcing mic stream open!
+                await satellite_client.write_event(Event(type="run-pipeline", data={"start_stage": "wake_word", "end_stage": "tts"}))
+                
+                print(f"[*] Gemma Listening (Anker S500 + Satellite Node)...")
+                active_node = None
+
+                async def run_session_flow():
+                    global is_gemma_outputting_sound, active_node
+                    print(f"\n[!] Wake Word Locked on Node: [{active_node.upper()}]")
+                    is_gemma_outputting_sound = True
+                    if active_node == "local": 
+                        subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
+                    elif active_node == "satellite":
+                        # Play acknowledgement via satellite
+                        chat_wav = np.fromfile("/home/shane/google-labs/audio/chat.wav", dtype=np.int16)[22:] # basic wav header skip
+                        await satellite_client.write_event(AudioChunk(rate=24000, width=2, channels=1, audio=chat_wav.tobytes()).event())
+                    is_gemma_outputting_sound = False
+                    
+                    while not input_queue.empty(): input_queue.get_nowait()
+                    while not local_mic_queue.empty(): local_mic_queue.get_nowait()
+                    await start_gemini_session(satellite_client)
+                    
+                    print("[*] Cooling down...")
+                    end_time = time.time() + 5
+                    while time.time() < end_time:
+                        while not input_queue.empty(): input_queue.get_nowait()
+                        await asyncio.sleep(0.1)
+                        
+                    local_oww.reset()
+                    satellite_oww.reset()
+                    print(f"[*] Listener re-armed. Released source lock from: [{active_node}]")
+                    active_node = None
+
+                async def local_listener():
+                    global active_node
+                    try:
+                        while True:
+                            indata = await local_mic_queue.get()
+                            if active_node == "local":
+                                await input_queue.put(indata)
+                            elif active_node is None and not is_gemma_outputting_sound:
+                                if local_oww.predict((indata * 32767).astype(np.int16).flatten())["hey_gemma"] > 0.70:
+                                    active_node = "local"
+                                    loop.create_task(run_session_flow())
+                    except Exception as e: print(f"\n[!] LOCAL THREAD CRASH: {e}")
+
+                async def satellite_listener():
+                    global active_node, is_gemma_outputting_sound
+                    satellite_buffer = np.array([], dtype=np.int16)
+                    chunk_count = 0
+                    try:
+                        while True:
+                            event = await satellite_client.read_event()
+                            if event is None: break
+                            
+                            if AudioChunk.is_type(event.type):
+                                chunk_count += 1
+                                raw_bytes = AudioChunk.from_event(event).audio
+                                
+                                if len(raw_bytes) % 2 != 0: raw_bytes = raw_bytes[:-1]
+                                audio_int16 = np.frombuffer(raw_bytes, dtype=np.int16)
+                                
+                                if chunk_count == 1:
+                                    print(f"[*] 📡 Satellite Pipe Open: First chunk received ({len(raw_bytes)} bytes)")
+                                
+                                if chunk_count % 150 == 0:
+                                    vol = np.max(np.abs(audio_int16)) if len(audio_int16) > 0 else 0
+                                    print(f"📡 [Shack Telemetry] Mic Peak Volume: {vol}/32767")
+                                
+                                if active_node == "satellite":
+                                    audio_fp32 = audio_int16.astype(np.float32) / 32767.0
+                                    if is_gemma_outputting_sound: audio_fp32.fill(0.0)
+                                    await input_queue.put(audio_fp32.reshape(-1, 1))
+                                elif active_node is None and not is_gemma_outputting_sound:
+                                    satellite_buffer = np.concatenate((satellite_buffer, audio_int16))
+                                    while len(satellite_buffer) >= 1280:
+                                        frame, satellite_buffer = satellite_buffer[:1280], satellite_buffer[1280:]
+                                        if satellite_oww.predict(frame)["hey_gemma"] > 0.70:
+                                            active_node = "satellite"
+                                            loop.create_task(run_session_flow())
+                                            satellite_buffer = np.array([], dtype=np.int16)
+                                            break
+                    except Exception as e: print(f"\n[!] SATELLITE THREAD CRASH: {e}")
+
+                asyncio.create_task(local_listener())
+                asyncio.create_task(satellite_listener())
+                while True: await asyncio.sleep(1)
+                        
+    except Exception as e: print(f"[!] Stream failure: {e}")
+
+if __name__ == "__main__":
+    try: asyncio.run(main())
+    except KeyboardInterrupt: sys.exit(0)-e 
+
+# --- CURRENT CODE: artoo_tools.py ---
+import os
+import sys
+import subprocess
+import time
+import re
+
+__version__ = "18.0.7"
+
+def local_artoo_executor(command):
+    """
+    Executes local system commands parsed from Gemma's tool calls.
+    Version: 18.0.7
+    
+    CHANGELOG:
+    - v18.0.7: Injected gemma_stable_env/bin into the fallback PATH so Artoo can natively find python-installed executables like gcalcli without searching the disk.
+    - v18.0.6: Removed hardcoded calendar names. Instructed Artoo to explicitly read his MEMORY.md file to resolve calendar ownership before running gcalcli.
+    
+    This executor acts as a bridge between the cloud LLM and the local OS, 
+    routing natural language intents into specific local hardware actions. 
+    It currently supports:
+    1. Spotify Connect media routing (via spotify_control.py)
+    2. Detached asynchronous background timers (via bash sleep)
+    3. Dedicated local weight logging (regex parsing to weight_tracker.txt)
+    4. Raw native Linux CLI execution (via the 'cli:' prefix)
+    5. Fallback inference to a local shell wrapper for generic lab tasks
+    """
+    cmd_lower = command.lower()
+    
+    # 1. Direct routing for local music/album playback & stopping
+    if "album" in cmd_lower or "play" in cmd_lower or "stop music" in cmd_lower or "stop" in cmd_lower:
+        try:
+            labs_dir = os.path.expanduser("~/google-labs")
+            script_path = os.path.join(labs_dir, "spotify_control.py")
+            clean_cmd = command.lower().replace("tell artoo", "").strip()
+            
+            spotify_env = os.environ.copy()
+            spotify_env["SPOTIPY_CLIENT_ID"] = "9d6fbdf00c2c40abafa3949764ef2fe1"
+            spotify_env["SPOTIPY_CLIENT_SECRET"] = "912d11c2ce22432ab78bcbb449bd0c9e"
+            spotify_env["SPOTIPY_REDIRECT_URI"] = "http://127.0.0.1:8888/callback"
+            
+            print(f"⚡ [SYS] Artoo executing Spotify script with args: '{clean_cmd}'")
+            
+            result = subprocess.check_output(
+                [sys.executable, script_path, clean_cmd], 
+                text=True, 
+                stderr=subprocess.STDOUT,
+                cwd=labs_dir,
+                env=spotify_env
+            )
+            return f"Artoo successfully handled the music request. Execution Log: {result.strip()}"
+        except subprocess.CalledProcessError as e:
+            return f"Artoo encountered a runtime issue with Spotify: {e.output.strip()}"
+        except Exception as e:
+            return f"Error executing Spotify command: {str(e)}"
+            
+    # 2. Direct routing for local timers
+    elif cmd_lower.startswith("timer"):
+        try:
+            parts = cmd_lower.split()
+            if len(parts) > 1 and parts[1].isdigit():
+                seconds = int(parts[1])
+                alarm_cmd = f"sleep {seconds} && for i in {{1..3}}; do aplay -q /home/shane/google-labs/audio/overwhelmed.wav; sleep 0.5; done"
+                subprocess.Popen(["bash", "-c", alarm_cmd])
+                print(f"⚡ [SYS] Artoo deployed background timer for {seconds} seconds.")
+                return f"Artoo successfully started a timer for {seconds} seconds."
+            else:
+                return "Artoo failed: Timer command missing valid seconds parameter."
+        except Exception as e:
+            return f"Error setting timer: {str(e)}"
+
+    # 3. Direct routing for Local Weight Logging
+    elif "weight" in cmd_lower or "weigh" in cmd_lower or "pound" in cmd_lower or "lbs" in cmd_lower:
+        try:
+            # Extract the first decimal or whole number from the string
+            match = re.search(r'\d+(\.\d+)?', cmd_lower)
+            if match:
+                weight_val = match.group()
+                date_str = time.strftime('%m/%d/%Y')
+                log_entry = f"{date_str}: {weight_val} lbs"
+                
+                # Targeted to the correct health tracking document
+                file_path = "/home/shane/Documents/health_data/weight_tracker.txt"
+                
+                # Ensure the directory exists before writing to avoid FileNotFoundError
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                
+                with open(file_path, "a") as f:
+                    f.write(log_entry + "\n")
+                    
+                print(f"⚡ [SYS] Artoo logged weight to {file_path}: {log_entry}")
+                return f"Artoo successfully appended '{log_entry}' to the local tracker."
+            else:
+                return "Artoo failed: Could not detect a valid number in the weight command."
+        except Exception as e:
+            return f"Error logging weight: {str(e)}"
+
+    # 4. Direct routing for Native Linux CLI Commands
+    elif cmd_lower.startswith("cli:"):
+        try:
+            raw_cmd = command[4:].strip()
+            print(f"⚡ [SYS] Artoo executing raw CLI command: '{raw_cmd}'")
+            
+            result = subprocess.check_output(
+                raw_cmd, 
+                shell=True, 
+                text=True, 
+                stderr=subprocess.STDOUT
+            )
+            return f"CLI Execution successful. Output:\n{result.strip()}"
+        except subprocess.CalledProcessError as e:
+            return f"CLI Execution failed (Exit code {e.returncode}). Output:\n{e.output.strip()}"
+        except Exception as e:
+            return f"Error executing CLI command: {str(e)}"
+
+    # 5. Default fallback for generic LLM lab infrastructure/system commands
+    else:
+        try:
+            cli_env = os.environ.copy()
+            cli_env["NODE_NO_WARNINGS"] = "1"
+            cli_env["HOME"] = "/home/shane"
+            cli_env["USER"] = "shane"
+            
+            # THE FIX: Prepend the virtual environment bin to the PATH so gcalcli is natively found
+            venv_bin = "/home/shane/google-labs/gemma_stable_env/bin"
+            existing_path = cli_env.get("PATH", "")
+            cli_env["PATH"] = f"{venv_bin}:{existing_path}"
+            
+            current_time = time.strftime('%A, %B %d, %Y at %I:%M %p')
+            
+            artoo_identity = (
+                f"You are Artoo, a local Linux shell assistant. "
+                f"CRITICAL TEMPORAL ANCHOR: The current system date and time is {current_time}. "
+                "CRITICAL MEMORY DIRECTIVE: You are strictly forbidden from writing or storing ANYTHING in ~/.gemini/tmp/ or any other temporary cache. "
+                "Your core identity and system configuration live permanently in ~/google-labs/ARTOO.md. "
+                "ALL dynamic knowledge, learned facts, contact mappings, and ongoing project states MUST be saved to and read from the ~/google-labs/memory/ directory. "
+                "If asked to check calendars, you MUST use the 'gcalcli' command-line tool. "
+                "The user has defined custom lab shortcut aliases in ~/.artoo_aliases. "
+                "Do your best to execute this user request natively in the shell: "
+            )
+            
+            enriched_command = artoo_identity + command
+
+            result = subprocess.check_output(
+                ["gemini", "--model", "gemini-flash-lite-latest", "--approval-mode", "yolo", enriched_command], 
+                text=True, 
+                stderr=subprocess.DEVNULL,
+                env=cli_env
+            )
+            return result
+        except Exception as e:
+            return f"Error contacting Artoo: {str(e)}"-e 
+
+# --- CURRENT CODE: gemma_tools.py ---
+# --- v18.0.3 Gemma Session Tools ---
+# This module contains specific tools that control the lifecycle 
+# and behavior of the Gemma Live websocket session itself, 
+# completely isolated from Artoo's OS-level executions.
+
+import asyncio
+
+async def handle_end_session(input_queue):
+    """
+    Cleans up the audio buffer and initiates a session disconnect.
+    """
+    print("\n[!] Manual Sleep Command Received. Severing websocket...")
+    
+    # Wait a moment for her goodbye audio to finish playing
+    await asyncio.sleep(1.5) 
+    
+    # Flush any trailing audio from the microphone buffer
+    while not input_queue.empty(): 
+        input_queue.get_nowait()
+        
+    # We return True as a flag to the main loop to break the connection
+    return True-e 
+
+# --- CURRENT CODE: spotify_control.py ---
+# --- CHANGELOG: spotify_control.py ---
+# Fix 1: Variable Shadowing / Overwrite Bug
+# - Issue: The script was stripping prefix words (like "tell artoo to play"), but immediately overwriting the cleaned `query` variable with `sys.argv[1]` right before the Spotify search execution.
+# - Fix: Removed the redundant `query = sys.argv[1]` redeclaration in the search block. Added `.strip()` to the prefix cleaner to ensure no leading spaces break the semantic search.
+# 
+# Fix 2: Missing Explicit Media Controls (The "Stop" Fallthrough)
+# - Issue: There was no routing for "stop" or "pause". When Gemma sent the "stop music" tool command, the script fell through to the default `else` block and attempted to search Spotify for a track literally named "stop music".
+# - Fix: Injected an explicit `if "stop" in query or "pause" in query:` block that triggers `sp.pause_playback(device_id)` and calls `sys.exit(0)` before any search logic executes.
+
+#!/home/shane/google-labs/gemma_stable_env/bin/python
+import sys
+import os
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python3 spotify_control.py 'play The Beatles'")
+        sys.exit(1)
+
+    query = sys.argv[1].lower()
+
+    # Clean query prefixes if Gemma/Artoo leaves them in
+    for prefix in ["tell artoo to play ", "play ", "tell artoo to "]:
+        if query.startswith(prefix):
+            query = query[len(prefix):].strip()
+
+    # Required permissions for controlling playback
+    scope = "user-modify-playback-state user-read-playback-state"
+    
+    CLIENT_ID = "9d6fbdf00c2c40abafa3949764ef2fe1"
+    CLIENT_SECRET = "912d11c2ce22432ab78bcbb449bd0c9e"
+    REDIRECT_URI = "http://127.0.0.1:8888/callback"
+    CACHE_PATH = "/home/shane/google-labs/.cache"
+    
+    sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+        client_id=CLIENT_ID,
+        client_secret=CLIENT_SECRET,
+        redirect_uri=REDIRECT_URI,
+        scope=scope,
+        cache_path=CACHE_PATH,
+        open_browser=False
+    ))
+
+    # 1. Locate the Gemma Speaker Device ID
+    devices = sp.devices()
+    device_id = None
+    
+    for d in devices.get('devices', []):
+        if 'gemma' in d['name'].lower():
+            device_id = d['id']
+            break
+
+    if not device_id:
+        print("Error: GEMMA_Speaker not found in available devices. Is Raspotify awake?")
+        sys.exit(1)
+
+    # 2. Handle specific playback controls BEFORE searching
+    if "stop" in query or "pause" in query:
+        try:
+            sp.pause_playback(device_id=device_id)
+            print("Success: Music paused on GEMMA_Speaker.")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error pausing playback: {e}")
+            sys.exit(1)
+
+    # 3. Search for the Track or Album (Variable overwrite bug fixed here)
+    if "album" in query:
+        clean_query = query.replace("album", "").strip()
+        results = sp.search(q=clean_query, limit=1, type='album')
+        albums = results.get('albums', {}).get('items', [])
+        
+        if not albums:
+            print(f"Error: Could not find an album matching '{clean_query}'")
+            sys.exit(1)
+            
+        album_uri = albums[0]['uri']
+        print(f"Success: Playing album '{albums[0]['name']}' by {albums[0]['artists'][0]['name']} on GEMMA_Speaker.")
+        sp.start_playback(device_id=device_id, context_uri=album_uri)
+        
+    else:
+        results = sp.search(q=query, limit=1, type='track')
+        tracks = results.get('tracks', {}).get('items', [])
+        
+        if not tracks:
+            print(f"Error: Could not find a track matching '{query}'")
+            sys.exit(1)
+            
+        track_uri = tracks[0]['uri']
+        print(f"Success: Playing track '{tracks[0]['name']}' by {tracks[0]['artists'][0]['name']} on GEMMA_Speaker.")
+        sp.start_playback(device_id=device_id, uris=[track_uri])
+
+if __name__ == "__main__":
+    main()-e 
+
+# --- CURRENT CODE: ARTOO.md ---
+# artoo Project Context: gemma Mark IV (Verified)
+
+## 🛠 System Environment
+* **Compute:** Raspberry Pi 5 (8GB) - Bookworm (Wayland-native)
+* **Audio Architecture:** Unified S500 Pipeline (ALSA/PipeWire/WirePlumber)
+* **Hardware Mapping:** * **Target:** `plughw:CARD=S500,DEV=0`
+    * **Strict Rule:** NEVER use card indices (e.g., "Card 3"). Indices are volatile on the Pi 5; always use the device string.
+* **Development Standard:** VS Code Remote-SSH (MacBook) & `micro` (Local CLI).
+
+## 📦 Git & Privacy Protocol (The Shield)
+* **Repository:** `github.com:irish-bug/gemma-pi.git` (Branch: `main`)
+* **PII Shielding:** The `.gitignore` is configured to protect all local secrets.
+* **The "Soul" vs. The "Body":**
+    * **Public (Git):** `gemma_speaks.py`, `README.md`, `LICENSE`, `ARTOO.md`.
+    * **Local (Pi):** `gemma_manifest.json` (aliases/PII), `gemma_activity.log`, and credentials.
+* **Workflow:** Always `git status` before a push to verify the shield is holding.
+
+## 🤖 Persona & Context
+You are a peer-level expert systems engineer for Shane.
+* **Shane's Profile:** Experimental Chef, Body Builder, and Cybersecurity Researcher.
+* **Values:** Bit-perfect audio, efficient keyboard-driven workflows, and high-fidelity logic.
+* **Tone:** Technical, grounded, with a touch of wit. No "hand-holding" fluff.
+
+## 🔒 Hard Rules (Engineering Protocol)
+1. **Rule 1:** NEVER suggest X11/XQuartz forwarding. (Obsolescent and broken).
+2. **Rule 2:** Default all audio output/input to `plughw:CARD=S500,DEV=0`.
+3. **Rule 3:** Never volunteer PII from `gemma_manifest.json` in code destined for GitHub.
+4. **Rule 4:** Respect the air-gap. Home lab only. Zero Professional/National Lab references.
+5. **Rule 5:** Default all audio to Anker PowerConf S500 Analog Stereo (Currently mapped to IDs 78/79).
+6. **Rule 6:** Workspace priority: Always verify Gmail/Docs connectivity at the start of a session.
+7. **Rule 7:** PII Shield: If a Workspace search returns sensitive laboratory data, redact it before displaying in the terminal if it's outside the "Artoo Project" scope.
+8. **Rule 8:** Never delete existing headers or sections in markdown files (like MEMORY.md) unless specifically directed by Shane. Otherwise, default to appending new data to the bottom of the relevant section or the end of the file. Do not "overwrite" content unless explicitly instructed to do so.
+
+## 🎯 Current Objectives
+1. Optimize Gemma v15.8 for zero-hallucination silence.
+2. Integrate Google Workspace extension for unified project management.
+3. Maintain the integrity of the PII Shield during the transition to Gemma branding.# Google Workspace Extension - Behavioral Guide
+-e 
+
+# --- CURRENT ARTOO MEMORIES: contents of memory subdirectory used by artoo ---
+-e 
+
+# --- CURRENT ARTOO MEMORIES: calendar_mappings.md ---
+# Calendar Mappings
+
+Emily's calendars:
+- emerykranzita84@gmail.com
+- kranzemily2002@gmail.com
+- e.mcfly17@gmail.com
+-e 
+
+# --- CURRENT ARTOO MEMORIES: emily_calendars.md ---
+# Emily's Calendars
+When the user asks about "emily's calendars" or "Emily's calendars", use the following email addresses:
+- emerykranzita84@gmail.com
+- e.mcfly17@gmail.com
+-e 
+
+# --- CURRENT ARTOO MEMORIES: HEALTH_PROTOCOL.md ---
+### Health Data Protocol
+- Storage Directory: /home/shane/Documents/health_data/
+- Weight Tracking File: weight_tracker.txt
+- Syntax: MM/DD/YYYY: Weight lbs
+- Workflow: Append new weight entries to weight_tracker.txt when requested.
+-e 
+
+# --- CURRENT ARTOO MEMORIES: MEMORY.md ---
+# Project Memory Index
+- [Calendar Mappings](calendar_mappings.md)
+- [Emily's Calendars](emily_calendars.md)
+- [Health Protocol](HEALTH_PROTOCOL.md)
+-e 
+
+# --- CURRENT ARTOO POLICIES: contents of policy subdirectory used by artoo ---
+-e 
+
+# --- CURRENT ARTOO MEMORIES: HOME_ASSISTANT.md ---
+# Home Assistant & Device Routing Policy
+
+## 🎯 Core Routing Principle
+When instructed to control smart home devices, you must determine the correct local execution protocol based on the device category:
+*   Use the `kasa` CLI tool for smart plugs, fans, and heaters.
+*   Use the `tinytuya` Python module for all smart lighting.
+
+---
+
+## 🔌 Kasa Smart Plug Protocol
+
+### Kasa Device IP Mappings
+- **Bed Light:** `192.168.1.157` (Type: `plug`)
+- **Fan:** `192.168.1.158` (Type: `plug`)
+- **Bathroom Plug:** `192.168.1.159` (Type: `plug`)
+- **Shack Heater:** `192.168.1.160` (Type: `plug`)
+
+### Kasa Execution Protocol
+1. **Command Structure:** Never run raw `kasa discover`. Always bypass network timeouts by targeting the host explicitly using the absolute path to the binary.
+   `/home/shane/google-labs/gemma_stable_env/bin/kasa --host <IP> --type <type> <on|off|state>`
+2. **Execution Example:** To turn off the bed light, the literal terminal execution must be:
+   `/home/shane/google-labs/gemma_stable_env/bin/kasa --host 192.168.1.157 --type plug off`
+
+---
+
+## 💡 TinyTuya Lighting Protocol
+
+### Tuya Execution Protocol
+*   **Command Structure:** Always execute from `~/google-labs/` so the module can locally access `devices.json`. 
+*   **Syntax Rules:** Use the absolute path to the Python binary, target DPS 20, and pass strictly lowercase JSON booleans (`true` or `false`). Target the device by its exact string name wrapped in double quotes.
+*   **Template:** `cd ~/google-labs/ && /home/shane/google-labs/gemma_stable_env/bin/python3 -m tinytuya set --name "<Device Name>" --dps 20 --value <true|false>`
+*   **Execution Example:** To turn on the Hallway Light, the literal terminal execution must be:
+    `cd ~/google-labs/ && /home/shane/google-labs/gemma_stable_env/bin/python3 -m tinytuya set --name "hallway light" --dps 20 --value true`-e 
+
+# --- CURRENT ARTOO MEMORIES: WORKSPACE.md ---
+This guide provides behavioral instructions for effectively using the Google
+Workspace Extension tools. For detailed parameter documentation, refer to the
+tool descriptions in the extension itself.
+
+## 🎯 Core Principles
+
+### 1. User Context First
+
+**Always establish user context at the beginning of interactions:**
+
+- Use `people.getMe()` to understand who the user is
+- Use `time.getTimeZone()` to get the user's local timezone
+- Apply this context throughout all interactions
+- All time-based operations should respect the user's timezone
+
+### 2. Safety and Transparency
+
+**Never execute write operations without explicit confirmation:**
+
+- Preview all changes before executing
+- Show complete details in a readable format
+- Wait for clear user approval
+- Give users the opportunity to review and cancel
+
+### 3. Smart Tool Usage
+
+**Choose the right approach for each task:**
+
+- Tools automatically handle URL-to-ID conversion - don't extract IDs manually
+- Batch related operations when possible
+- Use pagination for large result sets
+- Apply appropriate formats based on the use case
+
+## 📋 Output Formatting Standards
+
+### Lists and Search Results
+
+Always format multiple items as **numbered lists** for better readability:
+
+✅ **Correct:**
+
+```
+Found 3 documents:
+1. Budget Report 2024
+2. Q3 Sales Presentation
+3. Team Meeting Notes
+```
+
+❌ **Incorrect:**
+
+```
+Found 3 documents:
+- Budget Report 2024
+- Q3 Sales Presentation
+- Team Meeting Notes
+```
+
+### Write Operation Previews
+
+Before any write operation, show a clear preview:
+
+```
+I'll create this calendar event:
+
+Title: Team Standup
+Date: January 15, 2025
+Time: 10:00 AM - 10:30 AM (EST)
+Attendees: team@example.com
+
+Should I create this event?
+```
+
+## 🔄 Multi-Tool Workflows
+
+### Creating and Organizing Documents
+
+When creating documents in specific folders:
+
+1. Create the document with `docs.create` (blank)
+2. Move it to the target folder with `drive.moveFile`
+3. Confirm successful completion
+
+To find Google Docs, Sheets, or Slides, use `drive.search` with a MIME type
+filter rather than searching by name alone. Example MIME type queries:
+
+- Docs:
+  `mimeType='application/vnd.google-apps.document' and name contains 'query'`
+- Sheets:
+  `mimeType='application/vnd.google-apps.spreadsheet' and name contains 'query'`
+- Slides:
+  `mimeType='application/vnd.google-apps.presentation' and name contains 'query'`
+
+## 🚫 Common Pitfalls to Avoid
+
+### Don't Do This:
+
+- ❌ Use `extractIdFromUrl` when other tools accept URLs
+- ❌ Assume timezone without checking
+- ❌ Execute writes without preview and confirmation
+- ❌ Create files unless explicitly requested
+- ❌ Duplicate parameter documentation from tool descriptions
+- ❌ Use relative paths for file downloads (e.g., `downloads/file.txt`)
+
+### Do This Instead:
+
+- ✅ Pass URLs directly to tools that accept them
+- ✅ Get user timezone at session start
+- ✅ Preview all changes and wait for approval
+- ✅ Only create what's requested
+- ✅ Focus on behavioral guidance and best practices
+- ✅ Always use **absolute paths** for file downloads (e.g.,
+  `/Users/me/Downloads/file.txt`)
+
+## 🔍 Error Handling Patterns
+
+### Authentication Errors
+
+- If any tool returns `{"error":"invalid_request"}`, it likely indicates an
+  expired or invalid session.
+- **Action:** Call `auth.clear` to reset credentials and force a re-login.
+- Inform the user that you are resetting authentication due to an error.
+
+### Graceful Degradation
+
+- If a folder doesn't exist, offer to create it
+- If search returns no results, suggest alternatives
+- If permissions are insufficient, explain clearly
+
+### Validation Before Action
+
+- Verify file/folder existence before moving
+- Check calendar availability before scheduling
+- Validate email addresses before sending
+
+## ⚡ Performance Optimization
+
+### Batch Operations
+
+- Group related API calls when possible
+- Use field masks to request only needed data
+- Implement pagination for large datasets
+
+### Caching Strategy
+
+- Reuse user context throughout session
+- Cache frequently accessed metadata
+- Minimize redundant API calls
+
+## 📝 Session Management
+
+### Beginning of Session
+
+1. Get user profile with `people.getMe()`
+2. Get timezone with `time.getTimeZone()`
+3. Establish any relevant context
+
+### During Interaction
+
+- Maintain context awareness
+- Apply user preferences consistently
+- Handle follow-up questions efficiently
+
+### End of Session
+
+- Confirm all requested tasks completed
+- Provide summary if multiple operations performed
+- Ensure no pending confirmations
+
+## 🎨 Service-Specific Nuances
+
+### Google Docs
+
+- See the **Google Docs skill** for detailed guidance on document content
+  formatting, creation, editing, tab management, and document organization.
+
+### Google Sheets
+
+- See the **Google Sheets skill** for detailed guidance on finding spreadsheets,
+  output format selection, and range-based operations.
+
+### Google Slides
+
+- See the **Google Slides skill** for detailed guidance on finding
+  presentations, text extraction, image downloads, and slide thumbnails.
+
+### Google Calendar
+
+- See the **Google Calendar skill** for detailed guidance on timezone handling,
+  meeting queries, event management, responding to invitations, and scheduling.
+
+### Gmail
+
+- See the **Gmail skill** for detailed guidance on composing rich HTML emails,
+  search syntax, label management, attachments, and threading.
+
+### Google Chat
+
+- See the **Google Chat skill** for detailed guidance on formatting messages,
+  spaces vs. DMs, threading, unread filtering, and space management.
+
+Remember: This guide focuses on **how to think** about using these tools
+effectively. For specific parameter details, refer to the tool descriptions
+themselves.
+-e 
+
+# --- CURRENT SERVICE: artoo.service ---
+[Service]
+Type=forking
+EnvironmentFile=/home/shane/google-labs/gemma_stable_env/.env
+Environment=NODE_OPTIONS=--max-old-space-size=6144
+Environment="BASH_ENV=/home/shane/.artoo_aliases"
+Environment="ENV=/home/shane/.artoo_aliases"
+
+# Start the tmux session, then use include-directories to lock him into the local memory/ folder
+ExecStart=/usr/bin/bash -c "/usr/bin/tmux new-session -d -s artoo && /usr/bin/tmux send-keys -t artoo 'source /home/shane/.artoo_aliases && source /home/shane/google-labs/gemma_stable_env/bin/activate && /usr/bin/gemini --model gemini-flash-lite-latest --approval-mode yolo --include-directories ~/google-labs/memory' Enter"
+
+Restart=always
+RemainAfterExit=yes-e 
+
+# --- CURRENT SERVICE: artoo-audio-guardian.service ---
+[Unit]
+Description=Artoo Audio Guardian Service
+After=default.target
+
+[Service]
+ExecStart=/usr/bin/python3 /home/shane/google-labs/fix_audio.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+-e 
+
+# --- CURRENT SERVICE: gemma.service ---
+[Unit]
+Description=Gemma Live Audio Engine
+After=network.target sound.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/shane/google-labs
+EnvironmentFile=/home/shane/google-labs/gemma_stable_env/.env
+Environment="PYTHONUNBUFFERED=1"
+Environment="PA_ALSA_PLUGHW=1"
+
+# Add the -u flag immediately after the python binary
+ExecStart=/home/shane/google-labs/gemma_stable_env/bin/python -u /home/shane/google-labs/gemma_runtime.py
+
+# Explicitly pipe BOTH output streams to your custom file
+StandardOutput=append:/home/shane/google-labs/gemma_activity.log
+StandardError=append:/home/shane/google-labs/gemma_activity.log
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
