@@ -1,9 +1,9 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.2.8 Gemma Live: Spatial Multi-Node Audio (Raw TCP Pipe Optimization) ---
-# Change Message (v18.2.8):
-# - Stripped out all Wyoming protocol dependencies.
-# - Implemented raw asynchronous TCP socket connections for absolute lowest latency.
-# - Separated Mic (Port 10700) and Speaker (Port 10701) streams to bypass state-machine deadlocks.
+# --- v18.2.11 Gemma Live: Spatial Multi-Node Audio (Echo & Clipping Patch) ---
+# Change Message (v18.2.11):
+# - Implemented `satellite_tts_end_time` tracking to mathematically mute the remote mic while remote TTS is playing.
+# - Added `SATELLITE_OUT_BOOST` (0.6 multiplier) to prevent digital clipping on the ReSpeaker DAC.
+# - Applied duration tracking to the local `chat.wav` acknowledgement playback to prevent immediate re-triggers.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -25,6 +25,7 @@ VOICE = "Aoede"
 HW_FS, API_IN_FS, API_OUT_FS = 48000, 16000, 24000
 IN_RATIO, OUT_RATIO = 3, 2
 MIC_BOOST, OUT_BOOST = 8.0, 1.2 
+SATELLITE_OUT_BOOST = 0.6
 
 input_queue = asyncio.Queue()
 local_mic_queue = asyncio.Queue()
@@ -32,6 +33,7 @@ output_buffer = np.array([], dtype=np.float32)
 buffer_lock = threading.Lock()
 
 is_gemma_outputting_sound = False 
+satellite_tts_end_time = 0.0
 last_activity_time = time.time()
 is_tool_running = False 
 active_node = None 
@@ -57,7 +59,7 @@ def spk_callback(outdata, frames, time_info, status):
 
 # --- 3. THE LIVE BRAIN ---
 async def start_gemini_session(spk_writer):
-    global last_activity_time
+    global last_activity_time, satellite_tts_end_time
     last_activity_time = time.time()
     uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
     user_context = os.environ.get("USER_CONTEXT", "User is a human interacting via voice.")
@@ -97,7 +99,7 @@ async def start_gemini_session(spk_writer):
                         return 
 
             async def receive_loop():
-                global last_activity_time, is_tool_running, output_buffer
+                global last_activity_time, is_tool_running, output_buffer, satellite_tts_end_time
                 async for message in ws:
                     msg = json.loads(message)
                     last_activity_time = time.time()
@@ -121,8 +123,22 @@ async def start_gemini_session(spk_writer):
                             if "inlineData" in part:
                                 raw = base64.b64decode(part["inlineData"]["data"])
                                 if active_node == "satellite":
-                                    spk_writer.write(raw)
+                                    # Numpy Downsampling & Volume Reduction
+                                    audio_16 = np.frombuffer(raw, dtype=np.int16)
+                                    mask = np.ones(len(audio_16), dtype=bool)
+                                    mask[2::3] = False
+                                    chunk_to_send = (audio_16[mask] * SATELLITE_OUT_BOOST).astype(np.int16)
+                                    spk_writer.write(chunk_to_send.tobytes())
                                     await spk_writer.drain()
+                                    
+                                    # Mathematically lock the microphone while audio plays
+                                    duration = len(chunk_to_send) / 16000.0
+                                    current = time.time()
+                                    if satellite_tts_end_time < current:
+                                        satellite_tts_end_time = current + duration + 0.3 # 300ms tail padding
+                                    else:
+                                        satellite_tts_end_time += duration
+                                        
                                 elif active_node == "local":
                                     audio_up = np.repeat(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0, OUT_RATIO)
                                     with buffer_lock: output_buffer = np.concatenate((output_buffer, audio_up))
@@ -136,7 +152,7 @@ async def start_gemini_session(spk_writer):
     except Exception as e: print(f"\n[!] Session Closed: {e}")
 
 async def main():
-    global loop, is_gemma_outputting_sound, active_node
+    global loop, is_gemma_outputting_sound, active_node, satellite_tts_end_time
     loop = asyncio.get_running_loop()
     
     local_oww = Model(wakeword_models=["models/hey_gemma.onnx"], inference_framework="onnx")
@@ -149,9 +165,9 @@ async def main():
             
             try:
                 print("[*] Connecting to Shack Mic (Port 10700)...")
-                mic_reader, _ = await asyncio.open_connection('192.168.1.213', 10700)
+                mic_reader, mic_writer = await asyncio.open_connection('192.168.1.213', 10700)
                 print("[*] Connecting to Shack Speaker (Port 10701)...")
-                _, spk_writer = await asyncio.open_connection('192.168.1.213', 10701)
+                spk_reader, spk_writer = await asyncio.open_connection('192.168.1.213', 10701)
             except Exception as e:
                 print(f"[!] Failed to connect to Shack TCP pipes: {e}")
                 return
@@ -160,15 +176,20 @@ async def main():
             active_node = None
 
             async def run_session_flow():
-                global is_gemma_outputting_sound, active_node
+                global is_gemma_outputting_sound, active_node, satellite_tts_end_time
                 print(f"\n[!] Wake Word Locked on Node: [{active_node.upper()}]")
                 is_gemma_outputting_sound = True
                 if active_node == "local": 
                     subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
                 elif active_node == "satellite":
                     chat_wav = np.fromfile("/home/shane/google-labs/audio/chat.wav", dtype=np.int16)[22:]
-                    spk_writer.write(chat_wav.tobytes())
+                    mask = np.ones(len(chat_wav), dtype=bool)
+                    mask[2::3] = False
+                    chunk_to_send = (chat_wav[mask] * SATELLITE_OUT_BOOST).astype(np.int16)
+                    spk_writer.write(chunk_to_send.tobytes())
                     await spk_writer.drain()
+                    satellite_tts_end_time = time.time() + (len(chunk_to_send) / 16000.0) + 0.3
+                    
                 is_gemma_outputting_sound = False
                 
                 while not input_queue.empty(): input_queue.get_nowait()
@@ -200,7 +221,7 @@ async def main():
                 except Exception as e: print(f"\n[!] LOCAL THREAD CRASH: {e}")
 
             async def satellite_listener():
-                global active_node, is_gemma_outputting_sound
+                global active_node, is_gemma_outputting_sound, satellite_tts_end_time
                 satellite_buffer = np.array([], dtype=np.int16)
                 chunk_count = 0
                 try:
@@ -221,11 +242,13 @@ async def main():
                             vol = np.max(np.abs(audio_int16)) if len(audio_int16) > 0 else 0
                             print(f"📡 [Shack Telemetry] Mic Peak Volume: {vol}/32767")
                         
+                        mute_satellite = time.time() < satellite_tts_end_time
+                        
                         if active_node == "satellite":
                             audio_fp32 = audio_int16.astype(np.float32) / 32767.0
-                            if is_gemma_outputting_sound: audio_fp32.fill(0.0)
+                            if mute_satellite: audio_fp32.fill(0.0)
                             await input_queue.put(audio_fp32.reshape(-1, 1))
-                        elif active_node is None and not is_gemma_outputting_sound:
+                        elif active_node is None and not mute_satellite:
                             satellite_buffer = np.concatenate((satellite_buffer, audio_int16))
                             while len(satellite_buffer) >= 1280:
                                 frame, satellite_buffer = satellite_buffer[:1280], satellite_buffer[1280:]
