@@ -1,9 +1,9 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.2.11 Gemma Live: Spatial Multi-Node Audio (Echo & Clipping Patch) ---
-# Change Message (v18.2.11):
-# - Implemented `satellite_tts_end_time` tracking to mathematically mute the remote mic while remote TTS is playing.
-# - Added `SATELLITE_OUT_BOOST` (0.6 multiplier) to prevent digital clipping on the ReSpeaker DAC.
-# - Applied duration tracking to the local `chat.wav` acknowledgement playback to prevent immediate re-triggers.
+# --- v18.2.12 Gemma Live: Spatial Multi-Node Audio (24kHz Native Playback) ---
+# Change Message (v18.2.12):
+# - Removed 24k -> 16k Numpy downsampling for the satellite node.
+# - Hardware separation on the remote node allows native 24,000 Hz playback via the USB Dongle.
+# - Updated echo-cancellation duration math to calculate based on the 24kHz stream.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -123,19 +123,17 @@ async def start_gemini_session(spk_writer):
                             if "inlineData" in part:
                                 raw = base64.b64decode(part["inlineData"]["data"])
                                 if active_node == "satellite":
-                                    # Numpy Downsampling & Volume Reduction
+                                    # Streaming native 24kHz audio without downsampling!
                                     audio_16 = np.frombuffer(raw, dtype=np.int16)
-                                    mask = np.ones(len(audio_16), dtype=bool)
-                                    mask[2::3] = False
-                                    chunk_to_send = (audio_16[mask] * SATELLITE_OUT_BOOST).astype(np.int16)
+                                    chunk_to_send = (audio_16 * SATELLITE_OUT_BOOST).astype(np.int16)
                                     spk_writer.write(chunk_to_send.tobytes())
                                     await spk_writer.drain()
                                     
-                                    # Mathematically lock the microphone while audio plays
-                                    duration = len(chunk_to_send) / 16000.0
+                                    # Mathematically lock the microphone based on 24000 Hz duration
+                                    duration = len(chunk_to_send) / 24000.0
                                     current = time.time()
                                     if satellite_tts_end_time < current:
-                                        satellite_tts_end_time = current + duration + 0.3 # 300ms tail padding
+                                        satellite_tts_end_time = current + duration + 0.3 
                                     else:
                                         satellite_tts_end_time += duration
                                         
@@ -182,13 +180,12 @@ async def main():
                 if active_node == "local": 
                     subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
                 elif active_node == "satellite":
+                    # Removed the downsampling mask here too, assuming chat.wav is 24kHz natively.
                     chat_wav = np.fromfile("/home/shane/google-labs/audio/chat.wav", dtype=np.int16)[22:]
-                    mask = np.ones(len(chat_wav), dtype=bool)
-                    mask[2::3] = False
-                    chunk_to_send = (chat_wav[mask] * SATELLITE_OUT_BOOST).astype(np.int16)
+                    chunk_to_send = (chat_wav * SATELLITE_OUT_BOOST).astype(np.int16)
                     spk_writer.write(chunk_to_send.tobytes())
                     await spk_writer.drain()
-                    satellite_tts_end_time = time.time() + (len(chunk_to_send) / 16000.0) + 0.3
+                    satellite_tts_end_time = time.time() + (len(chunk_to_send) / 24000.0) + 0.3
                     
                 is_gemma_outputting_sound = False
                 
@@ -237,10 +234,6 @@ async def main():
                         
                         if chunk_count == 1:
                             print(f"[*] 📡 Shack TCP Pipe Open: First chunk received ({len(raw_bytes)} bytes)")
-                        
-                        if chunk_count % 150 == 0:
-                            vol = np.max(np.abs(audio_int16)) if len(audio_int16) > 0 else 0
-                            print(f"📡 [Shack Telemetry] Mic Peak Volume: {vol}/32767")
                         
                         mute_satellite = time.time() < satellite_tts_end_time
                         
