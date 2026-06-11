@@ -1,9 +1,9 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.2.12 Gemma Live: Spatial Multi-Node Audio (24kHz Native Playback) ---
-# Change Message (v18.2.12):
-# - Removed 24k -> 16k Numpy downsampling for the satellite node.
-# - Hardware separation on the remote node allows native 24,000 Hz playback via the USB Dongle.
-# - Updated echo-cancellation duration math to calculate based on the 24kHz stream.
+# --- v18.2.13 Gemma Live: Spatial Multi-Node Audio (Node-Aware Tools) ---
+# Change Message:
+# - Injected current_node context into the Gemini system prompt.
+# - Updated run_artoo_cmd tool schema to require a target_node string.
+# - Passed target_node argument down to the local_artoo_executor thread.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -58,7 +58,7 @@ def spk_callback(outdata, frames, time_info, status):
             is_gemma_outputting_sound = False 
 
 # --- 3. THE LIVE BRAIN ---
-async def start_gemini_session(spk_writer):
+async def start_gemini_session(spk_writer, current_node):
     global last_activity_time, satellite_tts_end_time
     last_activity_time = time.time()
     uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
@@ -70,10 +70,21 @@ async def start_gemini_session(spk_writer):
                 "setup": {
                     "model": f"models/{MODEL}",
                     "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE}}}},
-                    "systemInstruction": {"parts": [{"text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, set a timer, execute a Linux shell command, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. CRITICAL: If the user asks for a system command (like checking disk space, appending data to a text file, restarting a service), you MUST translate their intent into a raw Linux Bash command and prefix it with 'cli:' (e.g., 'cli: df -h'). Do not output markdown text headers or text explanations of your thoughts. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result. CRITICAL OVERRIDE: If the user says goodbye, 'go to bed', or tells you to go to sleep, NEVER use the 'run_artoo_cmd' tool. You MUST exclusively trigger the 'end_live_session' tool."}]},
+                    "systemInstruction": {"parts": [{"text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. CRITICAL: The user is currently talking to you through the '{current_node}' hardware node. When commanded to run a lab task, control music, set a timer, or execute a Linux shell command, you MUST execute the 'run_artoo_cmd' tool immediately. If the user asks for music or media, set the 'target_node' parameter to '{current_node}' unless they explicitly specify otherwise. Do not output markdown text headers or text explanations of your thoughts. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result. CRITICAL OVERRIDE: If the user says goodbye, 'go to bed', or tells you to go to sleep, NEVER use the 'run_artoo_cmd' tool. You MUST exclusively trigger the 'end_live_session' tool."}]},
                     "tools": [
                         {"functionDeclarations": [
-                            {"name": "run_artoo_cmd", "description": "Run lab commands, control Spotify, set a timer, or execute raw Bash CLI commands.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+                            {
+                                "name": "run_artoo_cmd", 
+                                "description": "Run lab commands, control music, set a timer, or execute raw Bash CLI commands.", 
+                                "parameters": {
+                                    "type": "object", 
+                                    "properties": {
+                                        "command": {"type": "string"},
+                                        "target_node": {"type": "string", "description": "The execution node ('local' or 'satellite')."}
+                                    }, 
+                                    "required": ["command", "target_node"]
+                                }
+                            },
                             {"name": "end_live_session", "description": "Call immediately when user says goodbye.", "parameters": {"type": "object", "properties": {}}}
                         ]},
                         {"googleSearch": {}}
@@ -82,7 +93,7 @@ async def start_gemini_session(spk_writer):
             }
             await ws.send(json.dumps(setup))
             await ws.recv() 
-            print(f"\n[LIVE] Session Active on Node: [{active_node.upper()}]")
+            print(f"\n[LIVE] Session Active on Node: [{current_node.upper()}]")
 
             async def send_loop():
                 global last_activity_time, is_tool_running
@@ -107,14 +118,23 @@ async def start_gemini_session(spk_writer):
                     if "toolCall" in msg:
                         function_calls = msg["toolCall"].get("functionCalls", [])
                         for fc in function_calls:
-                            call_id, func_name, cmd_args = fc.get("id"), fc.get("name"), fc.get("args", {}).get("command", "")
+                            call_id, func_name, args = fc.get("id"), fc.get("name"), fc.get("args", {})
+                            
                             if func_name == "end_live_session":
                                 if await handle_end_session(input_queue): return 
-                            else:
-                                if active_node == "local": subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
-                                print("[*] Waiting for Artoo to finish execution...")
+                            elif func_name == "run_artoo_cmd":
+                                cmd_args = args.get("command", "")
+                                target_node = args.get("target_node", current_node)
+                                
+                                if current_node == "local": 
+                                    subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
+                                    
+                                print(f"[*] Waiting for Artoo to execute on [{target_node.upper()}]...")
                                 is_tool_running = True
-                                execution_result = await asyncio.to_thread(local_artoo_executor, cmd_args)
+                                
+                                # Passes the new target_node argument to your tools file
+                                execution_result = await asyncio.to_thread(local_artoo_executor, cmd_args, target_node)
+                                
                                 is_tool_running, last_activity_time = False, time.time() 
                                 await ws.send(json.dumps({"toolResponse": {"functionResponses": [{"id": call_id, "name": func_name, "response": {"result": execution_result}}]}}))
 
@@ -122,14 +142,12 @@ async def start_gemini_session(spk_writer):
                         for part in msg["serverContent"].get("modelTurn", {}).get("parts", []):
                             if "inlineData" in part:
                                 raw = base64.b64decode(part["inlineData"]["data"])
-                                if active_node == "satellite":
-                                    # Streaming native 24kHz audio without downsampling!
+                                if current_node == "satellite":
                                     audio_16 = np.frombuffer(raw, dtype=np.int16)
                                     chunk_to_send = (audio_16 * SATELLITE_OUT_BOOST).astype(np.int16)
                                     spk_writer.write(chunk_to_send.tobytes())
                                     await spk_writer.drain()
                                     
-                                    # Mathematically lock the microphone based on 24000 Hz duration
                                     duration = len(chunk_to_send) / 24000.0
                                     current = time.time()
                                     if satellite_tts_end_time < current:
@@ -137,7 +155,7 @@ async def start_gemini_session(spk_writer):
                                     else:
                                         satellite_tts_end_time += duration
                                         
-                                elif active_node == "local":
+                                elif current_node == "local":
                                     audio_up = np.repeat(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0, OUT_RATIO)
                                     with buffer_lock: output_buffer = np.concatenate((output_buffer, audio_up))
                             if "text" in part: 
@@ -180,7 +198,6 @@ async def main():
                 if active_node == "local": 
                     subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
                 elif active_node == "satellite":
-                    # Removed the downsampling mask here too, assuming chat.wav is 24kHz natively.
                     chat_wav = np.fromfile("/home/shane/google-labs/audio/chat.wav", dtype=np.int16)[22:]
                     chunk_to_send = (chat_wav * SATELLITE_OUT_BOOST).astype(np.int16)
                     spk_writer.write(chunk_to_send.tobytes())
@@ -191,7 +208,9 @@ async def main():
                 
                 while not input_queue.empty(): input_queue.get_nowait()
                 while not local_mic_queue.empty(): local_mic_queue.get_nowait()
-                await start_gemini_session(spk_writer)
+                
+                # Passing the hardware context into the API session
+                await start_gemini_session(spk_writer, active_node)
                 
                 print("[*] Cooling down...")
                 end_time = time.time() + 5
