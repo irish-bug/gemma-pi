@@ -1,6 +1,8 @@
 # Project Artoo - Operational Makefile v18
 # Status: Synchronized with gemma_stable_env & Gemma Live v18
 
+SHELL := /bin/bash
+
 .PHONY: setup test run commit clean
 
 # Central Environment Configuration
@@ -35,8 +37,7 @@ run:
 commit:
 	@make test
 	@git add .
-	@read -p "Enter commit message: " msg; \
-	git commit -m "$$msg"
+	@git commit -m "$(if $(msg),$(msg),Auto-commit: $(shell date +'%Y-%m-%d %H:%M:%S'))"
 	@echo "Pushing validated architecture to GitHub..."
 	@git push
 	@echo "Deployment to cloud repository complete."

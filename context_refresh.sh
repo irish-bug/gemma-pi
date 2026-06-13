@@ -1,4 +1,5 @@
-#!/bin/bash # Combines the architectural summary and the latest code into one file for Gemini 
+#!/bin/bash 
+# Combines the architectural summary and the latest code into one file for Gemini 
 OUTPUT="gemma_manifest.txt" 
 echo "# PROJECT GEMMA - CURRENT STATE" > $OUTPUT 
 cat gemma_summary.md >> $OUTPUT 

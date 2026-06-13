@@ -29,21 +29,18 @@ Gemma Project chat context and manifest
 * The network TCP connection is flawless. The Pi 5 successfully sends audio to the shack (`aplay` at 24kHz works).
 * The shack's microphone is actively recording (`arecord` at 16kHz works), but the Wyoming protocol was holding the data in "standby" because it required a formal pipeline handshake to open the stream.
 * **v18.2.6** of `gemma_runtime.py` was just deployed to the Pi 5. It uses the official Wyoming Python classes (`WakeUp`, `RunPipeline`, `PipelineStage`) to execute a mathematically perfect protocol handshake.
-* The satellite is currently running in `--debug` mode in the foreground to trace the exact protocol responses.-e 
+* The satellite is currently running in `--debug` mode in the foreground to trace the exact protocol responses.
 
 # --- CURRENT CODE: gemma_runtime.py ---
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.2.5 Gemma Live: Spatial Multi-Node Audio (Pipeline Trigger Patch) ---
-# Change Message (v18.2.5):
-# - Imported wyoming Event class to manually construct protocol handshakes.
-# - Fixed AudioStart sample rate to 24000 to match remote aplay expectation.
-# - Sent explicit run-pipeline event to force the satellite out of standby and transmit mic chunks.
+# --- v18.2.13 Gemma Live: Spatial Multi-Node Audio (Node-Aware Tools) ---
+# Change Message:
+# - Injected current_node context into the Gemini system prompt.
+# - Updated run_artoo_cmd tool schema to require a target_node string.
+# - Passed target_node argument down to the local_artoo_executor thread.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
-from wyoming.client import AsyncClient
-from wyoming.audio import AudioChunk, AudioStart
-from wyoming.event import Event # <-- New import for protocol handshake
 import sounddevice as sd
 
 os.environ["ORT_LOG_SEVERITY_LEVEL"] = "3"
@@ -62,6 +59,7 @@ VOICE = "Aoede"
 HW_FS, API_IN_FS, API_OUT_FS = 48000, 16000, 24000
 IN_RATIO, OUT_RATIO = 3, 2
 MIC_BOOST, OUT_BOOST = 8.0, 1.2 
+SATELLITE_OUT_BOOST = 0.6
 
 input_queue = asyncio.Queue()
 local_mic_queue = asyncio.Queue()
@@ -69,6 +67,7 @@ output_buffer = np.array([], dtype=np.float32)
 buffer_lock = threading.Lock()
 
 is_gemma_outputting_sound = False 
+satellite_tts_end_time = 0.0
 last_activity_time = time.time()
 is_tool_running = False 
 active_node = None 
@@ -93,8 +92,8 @@ def spk_callback(outdata, frames, time_info, status):
             is_gemma_outputting_sound = False 
 
 # --- 3. THE LIVE BRAIN ---
-async def start_gemini_session(satellite_client):
-    global last_activity_time
+async def start_gemini_session(spk_writer, current_node):
+    global last_activity_time, satellite_tts_end_time
     last_activity_time = time.time()
     uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
     user_context = os.environ.get("USER_CONTEXT", "User is a human interacting via voice.")
@@ -105,10 +104,21 @@ async def start_gemini_session(satellite_client):
                 "setup": {
                     "model": f"models/{MODEL}",
                     "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": VOICE}}}},
-                    "systemInstruction": {"parts": [{"text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. When commanded to run a lab task, control music, set a timer, execute a Linux shell command, or 'tell artoo' to do something, you MUST execute the 'run_artoo_cmd' tool immediately. CRITICAL: If the user asks for a system command (like checking disk space, appending data to a text file, restarting a service), you MUST translate their intent into a raw Linux Bash command and prefix it with 'cli:' (e.g., 'cli: df -h'). Do not output markdown text headers or text explanations of your thoughts. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result. CRITICAL OVERRIDE: If the user says goodbye, 'go to bed', or tells you to go to sleep, NEVER use the 'run_artoo_cmd' tool. You MUST exclusively trigger the 'end_live_session' tool."}]},
+                    "systemInstruction": {"parts": [{"text": f"Your name is Gemma. You are a witty AI. {user_context} You have a local assistant named Artoo. CRITICAL: The user is currently talking to you through the '{current_node}' hardware node. When commanded to run a lab task, control music, set a timer, or execute a Linux shell command, you MUST execute the 'run_artoo_cmd' tool immediately. If the user asks for music or media, set the 'target_node' parameter to '{current_node}' unless they explicitly specify otherwise. Do not output markdown text headers or text explanations of your thoughts. Speak your final answer directly via the audio stream. DO NOT narrate your actions, plan, or say what you are about to do. Fire tools silently and wait for the result. CRITICAL OVERRIDE: If the user says goodbye, 'go to bed', or tells you to go to sleep, NEVER use the 'run_artoo_cmd' tool. You MUST exclusively trigger the 'end_live_session' tool."}]},
                     "tools": [
                         {"functionDeclarations": [
-                            {"name": "run_artoo_cmd", "description": "Run lab commands, control Spotify, set a timer, or execute raw Bash CLI commands.", "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
+                            {
+                                "name": "run_artoo_cmd", 
+                                "description": "Run lab commands, control music, set a timer, or execute raw Bash CLI commands.", 
+                                "parameters": {
+                                    "type": "object", 
+                                    "properties": {
+                                        "command": {"type": "string"},
+                                        "target_node": {"type": "string", "description": "The execution node ('local' or 'satellite')."}
+                                    }, 
+                                    "required": ["command", "target_node"]
+                                }
+                            },
                             {"name": "end_live_session", "description": "Call immediately when user says goodbye.", "parameters": {"type": "object", "properties": {}}}
                         ]},
                         {"googleSearch": {}}
@@ -117,7 +127,7 @@ async def start_gemini_session(satellite_client):
             }
             await ws.send(json.dumps(setup))
             await ws.recv() 
-            print(f"\n[LIVE] Session Active on Node: [{active_node.upper()}]")
+            print(f"\n[LIVE] Session Active on Node: [{current_node.upper()}]")
 
             async def send_loop():
                 global last_activity_time, is_tool_running
@@ -134,7 +144,7 @@ async def start_gemini_session(satellite_client):
                         return 
 
             async def receive_loop():
-                global last_activity_time, is_tool_running, output_buffer
+                global last_activity_time, is_tool_running, output_buffer, satellite_tts_end_time
                 async for message in ws:
                     msg = json.loads(message)
                     last_activity_time = time.time()
@@ -142,14 +152,23 @@ async def start_gemini_session(satellite_client):
                     if "toolCall" in msg:
                         function_calls = msg["toolCall"].get("functionCalls", [])
                         for fc in function_calls:
-                            call_id, func_name, cmd_args = fc.get("id"), fc.get("name"), fc.get("args", {}).get("command", "")
+                            call_id, func_name, args = fc.get("id"), fc.get("name"), fc.get("args", {})
+                            
                             if func_name == "end_live_session":
                                 if await handle_end_session(input_queue): return 
-                            else:
-                                if active_node == "local": subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
-                                print("[*] Waiting for Artoo to finish execution...")
+                            elif func_name == "run_artoo_cmd":
+                                cmd_args = args.get("command", "")
+                                target_node = args.get("target_node", current_node)
+                                
+                                if current_node == "local": 
+                                    subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
+                                    
+                                print(f"[*] Waiting for Artoo to execute on [{target_node.upper()}]...")
                                 is_tool_running = True
-                                execution_result = await asyncio.to_thread(local_artoo_executor, cmd_args)
+                                
+                                # Passes the new target_node argument to your tools file
+                                execution_result = await asyncio.to_thread(local_artoo_executor, cmd_args, target_node)
+                                
                                 is_tool_running, last_activity_time = False, time.time() 
                                 await ws.send(json.dumps({"toolResponse": {"functionResponses": [{"id": call_id, "name": func_name, "response": {"result": execution_result}}]}}))
 
@@ -157,9 +176,20 @@ async def start_gemini_session(satellite_client):
                         for part in msg["serverContent"].get("modelTurn", {}).get("parts", []):
                             if "inlineData" in part:
                                 raw = base64.b64decode(part["inlineData"]["data"])
-                                if active_node == "satellite":
-                                    await satellite_client.write_event(AudioChunk(rate=API_OUT_FS, width=2, channels=1, audio=raw).event())
-                                elif active_node == "local":
+                                if current_node == "satellite":
+                                    audio_16 = np.frombuffer(raw, dtype=np.int16)
+                                    chunk_to_send = (audio_16 * SATELLITE_OUT_BOOST).astype(np.int16)
+                                    spk_writer.write(chunk_to_send.tobytes())
+                                    await spk_writer.drain()
+                                    
+                                    duration = len(chunk_to_send) / 24000.0
+                                    current = time.time()
+                                    if satellite_tts_end_time < current:
+                                        satellite_tts_end_time = current + duration + 0.3 
+                                    else:
+                                        satellite_tts_end_time += duration
+                                        
+                                elif current_node == "local":
                                     audio_up = np.repeat(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0, OUT_RATIO)
                                     with buffer_lock: output_buffer = np.concatenate((output_buffer, audio_up))
                             if "text" in part: 
@@ -172,116 +202,118 @@ async def start_gemini_session(satellite_client):
     except Exception as e: print(f"\n[!] Session Closed: {e}")
 
 async def main():
-    global loop, is_gemma_outputting_sound, active_node
+    global loop, is_gemma_outputting_sound, active_node, satellite_tts_end_time
     loop = asyncio.get_running_loop()
-    satellite_uri = "tcp://192.168.1.213:10700"
     
     local_oww = Model(wakeword_models=["models/hey_gemma.onnx"], inference_framework="onnx")
     satellite_oww = Model(wakeword_models=["models/hey_gemma.onnx"], inference_framework="onnx")
     
     try:
+        print("[*] Booting hardware streams (Anker S500)...")
         with sd.InputStream(device="default", channels=1, samplerate=HW_FS, callback=mic_callback, blocksize=3840), \
              sd.OutputStream(device="default", channels=1, samplerate=HW_FS, callback=spk_callback, blocksize=1024):
             
-            print(f"[*] Connecting to Satellite at {satellite_uri}...")
-            async with AsyncClient.from_uri(satellite_uri) as satellite_client:
+            try:
+                print("[*] Connecting to Shack Mic (Port 10700)...")
+                mic_reader, mic_writer = await asyncio.open_connection('192.168.1.213', 10700)
+                print("[*] Connecting to Shack Speaker (Port 10701)...")
+                spk_reader, spk_writer = await asyncio.open_connection('192.168.1.213', 10701)
+            except Exception as e:
+                print(f"[!] Failed to connect to Shack TCP pipes: {e}")
+                return
                 
-                # 1. Inform satellite of our API 24kHz playback rate
-                await satellite_client.write_event(AudioStart(rate=24000, width=2, channels=1).event())
+            print(f"[*] Gemma Listening (Anker S500 + Shack TCP Pipes)...")
+            active_node = None
+
+            async def run_session_flow():
+                global is_gemma_outputting_sound, active_node, satellite_tts_end_time
+                print(f"\n[!] Wake Word Locked on Node: [{active_node.upper()}]")
+                is_gemma_outputting_sound = True
+                if active_node == "local": 
+                    subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
+                elif active_node == "satellite":
+                    chat_wav = np.fromfile("/home/shane/google-labs/audio/chat.wav", dtype=np.int16)[22:]
+                    chunk_to_send = (chat_wav * SATELLITE_OUT_BOOST).astype(np.int16)
+                    spk_writer.write(chunk_to_send.tobytes())
+                    await spk_writer.drain()
+                    satellite_tts_end_time = time.time() + (len(chunk_to_send) / 24000.0) + 0.3
+                    
+                is_gemma_outputting_sound = False
                 
-                # 2. THE FIX: Command satellite to run pipeline, forcing mic stream open!
-                await satellite_client.write_event(Event(type="run-pipeline", data={"start_stage": "wake_word", "end_stage": "tts"}))
+                while not input_queue.empty(): input_queue.get_nowait()
+                while not local_mic_queue.empty(): local_mic_queue.get_nowait()
                 
-                print(f"[*] Gemma Listening (Anker S500 + Satellite Node)...")
+                # Passing the hardware context into the API session
+                await start_gemini_session(spk_writer, active_node)
+                
+                print("[*] Cooling down...")
+                end_time = time.time() + 5
+                while time.time() < end_time:
+                    while not input_queue.empty(): input_queue.get_nowait()
+                    await asyncio.sleep(0.1)
+                    
+                local_oww.reset()
+                satellite_oww.reset()
+                print(f"[*] Listener re-armed. Released source lock from: [{active_node}]")
                 active_node = None
 
-                async def run_session_flow():
-                    global is_gemma_outputting_sound, active_node
-                    print(f"\n[!] Wake Word Locked on Node: [{active_node.upper()}]")
-                    is_gemma_outputting_sound = True
-                    if active_node == "local": 
-                        subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
-                    elif active_node == "satellite":
-                        # Play acknowledgement via satellite
-                        chat_wav = np.fromfile("/home/shane/google-labs/audio/chat.wav", dtype=np.int16)[22:] # basic wav header skip
-                        await satellite_client.write_event(AudioChunk(rate=24000, width=2, channels=1, audio=chat_wav.tobytes()).event())
-                    is_gemma_outputting_sound = False
-                    
-                    while not input_queue.empty(): input_queue.get_nowait()
-                    while not local_mic_queue.empty(): local_mic_queue.get_nowait()
-                    await start_gemini_session(satellite_client)
-                    
-                    print("[*] Cooling down...")
-                    end_time = time.time() + 5
-                    while time.time() < end_time:
-                        while not input_queue.empty(): input_queue.get_nowait()
-                        await asyncio.sleep(0.1)
-                        
-                    local_oww.reset()
-                    satellite_oww.reset()
-                    print(f"[*] Listener re-armed. Released source lock from: [{active_node}]")
-                    active_node = None
+            async def local_listener():
+                global active_node
+                try:
+                    while True:
+                        indata = await local_mic_queue.get()
+                        if active_node == "local":
+                            await input_queue.put(indata)
+                        elif active_node is None and not is_gemma_outputting_sound:
+                            if local_oww.predict((indata * 32767).astype(np.int16).flatten())["hey_gemma"] > 0.70:
+                                active_node = "local"
+                                loop.create_task(run_session_flow())
+                except Exception as e: print(f"\n[!] LOCAL THREAD CRASH: {e}")
 
-                async def local_listener():
-                    global active_node
-                    try:
-                        while True:
-                            indata = await local_mic_queue.get()
-                            if active_node == "local":
-                                await input_queue.put(indata)
-                            elif active_node is None and not is_gemma_outputting_sound:
-                                if local_oww.predict((indata * 32767).astype(np.int16).flatten())["hey_gemma"] > 0.70:
-                                    active_node = "local"
-                                    loop.create_task(run_session_flow())
-                    except Exception as e: print(f"\n[!] LOCAL THREAD CRASH: {e}")
-
-                async def satellite_listener():
-                    global active_node, is_gemma_outputting_sound
-                    satellite_buffer = np.array([], dtype=np.int16)
-                    chunk_count = 0
-                    try:
-                        while True:
-                            event = await satellite_client.read_event()
-                            if event is None: break
+            async def satellite_listener():
+                global active_node, is_gemma_outputting_sound, satellite_tts_end_time
+                satellite_buffer = np.array([], dtype=np.int16)
+                chunk_count = 0
+                try:
+                    while True:
+                        raw_bytes = await mic_reader.read(4096)
+                        if not raw_bytes:
+                            print("[!] Shack Mic Stream Closed.")
+                            break
                             
-                            if AudioChunk.is_type(event.type):
-                                chunk_count += 1
-                                raw_bytes = AudioChunk.from_event(event).audio
-                                
-                                if len(raw_bytes) % 2 != 0: raw_bytes = raw_bytes[:-1]
-                                audio_int16 = np.frombuffer(raw_bytes, dtype=np.int16)
-                                
-                                if chunk_count == 1:
-                                    print(f"[*] 📡 Satellite Pipe Open: First chunk received ({len(raw_bytes)} bytes)")
-                                
-                                if chunk_count % 150 == 0:
-                                    vol = np.max(np.abs(audio_int16)) if len(audio_int16) > 0 else 0
-                                    print(f"📡 [Shack Telemetry] Mic Peak Volume: {vol}/32767")
-                                
-                                if active_node == "satellite":
-                                    audio_fp32 = audio_int16.astype(np.float32) / 32767.0
-                                    if is_gemma_outputting_sound: audio_fp32.fill(0.0)
-                                    await input_queue.put(audio_fp32.reshape(-1, 1))
-                                elif active_node is None and not is_gemma_outputting_sound:
-                                    satellite_buffer = np.concatenate((satellite_buffer, audio_int16))
-                                    while len(satellite_buffer) >= 1280:
-                                        frame, satellite_buffer = satellite_buffer[:1280], satellite_buffer[1280:]
-                                        if satellite_oww.predict(frame)["hey_gemma"] > 0.70:
-                                            active_node = "satellite"
-                                            loop.create_task(run_session_flow())
-                                            satellite_buffer = np.array([], dtype=np.int16)
-                                            break
-                    except Exception as e: print(f"\n[!] SATELLITE THREAD CRASH: {e}")
-
-                asyncio.create_task(local_listener())
-                asyncio.create_task(satellite_listener())
-                while True: await asyncio.sleep(1)
+                        chunk_count += 1
+                        if len(raw_bytes) % 2 != 0: raw_bytes = raw_bytes[:-1]
+                        audio_int16 = np.frombuffer(raw_bytes, dtype=np.int16)
                         
+                        if chunk_count == 1:
+                            print(f"[*] 📡 Shack TCP Pipe Open: First chunk received ({len(raw_bytes)} bytes)")
+                        
+                        mute_satellite = time.time() < satellite_tts_end_time
+                        
+                        if active_node == "satellite":
+                            audio_fp32 = audio_int16.astype(np.float32) / 32767.0
+                            if mute_satellite: audio_fp32.fill(0.0)
+                            await input_queue.put(audio_fp32.reshape(-1, 1))
+                        elif active_node is None and not mute_satellite:
+                            satellite_buffer = np.concatenate((satellite_buffer, audio_int16))
+                            while len(satellite_buffer) >= 1280:
+                                frame, satellite_buffer = satellite_buffer[:1280], satellite_buffer[1280:]
+                                if satellite_oww.predict(frame)["hey_gemma"] > 0.70:
+                                    active_node = "satellite"
+                                    loop.create_task(run_session_flow())
+                                    satellite_buffer = np.array([], dtype=np.int16)
+                                    break
+                except Exception as e: print(f"\n[!] SATELLITE THREAD CRASH: {e}")
+
+            asyncio.create_task(local_listener())
+            asyncio.create_task(satellite_listener())
+            while True: await asyncio.sleep(1)
+                    
     except Exception as e: print(f"[!] Stream failure: {e}")
 
 if __name__ == "__main__":
     try: asyncio.run(main())
-    except KeyboardInterrupt: sys.exit(0)-e 
+    except KeyboardInterrupt: sys.exit(0)
 
 # --- CURRENT CODE: artoo_tools.py ---
 import os
@@ -290,84 +322,85 @@ import subprocess
 import time
 import re
 
-__version__ = "18.0.7"
+__version__ = "18.0.10"
 
-def local_artoo_executor(command):
+def local_artoo_executor(command, target_node="local"):
     """
     Executes local system commands parsed from Gemma's tool calls.
-    Version: 18.0.7
+    Version: 18.0.10
     
     CHANGELOG:
+    - v18.0.10: Removed SSH dependency for Satellite Spotify routing. Now executes local spotify_control.py with target_node argument to utilize Spotify Connect cloud routing directly.
+    - v18.0.9: Fixed non-interactive SSH host key verification blocker by injecting StrictHostKeyChecking=no into all SSH subprocess calls. Reinforced error handling to return clean strings instead of unhandled exceptions, preventing WebSocket 1008 policy violation crashes.
+    - v18.0.8: Added Spatial Node Routing (target_node parameter). Injected SSH execution for Timers and CLI commands when targeting the 'satellite' node in the shed.
     - v18.0.7: Injected gemma_stable_env/bin into the fallback PATH so Artoo can natively find python-installed executables like gcalcli without searching the disk.
     - v18.0.6: Removed hardcoded calendar names. Instructed Artoo to explicitly read his MEMORY.md file to resolve calendar ownership before running gcalcli.
-    
-    This executor acts as a bridge between the cloud LLM and the local OS, 
-    routing natural language intents into specific local hardware actions. 
-    It currently supports:
-    1. Spotify Connect media routing (via spotify_control.py)
-    2. Detached asynchronous background timers (via bash sleep)
-    3. Dedicated local weight logging (regex parsing to weight_tracker.txt)
-    4. Raw native Linux CLI execution (via the 'cli:' prefix)
-    5. Fallback inference to a local shell wrapper for generic lab tasks
     """
     cmd_lower = command.lower()
     
-    # 1. Direct routing for local music/album playback & stopping
+    # Common SSH arguments to bypass strict host key checking in non-interactive subprocesses
+    ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
+    
+    # 1. Direct routing for local music/album playback & stopping (Uses Spotify Cloud API)
     if "album" in cmd_lower or "play" in cmd_lower or "stop music" in cmd_lower or "stop" in cmd_lower:
         try:
+            clean_cmd = command.lower().replace("tell artoo", "").strip()
+            
             labs_dir = os.path.expanduser("~/google-labs")
             script_path = os.path.join(labs_dir, "spotify_control.py")
-            clean_cmd = command.lower().replace("tell artoo", "").strip()
             
             spotify_env = os.environ.copy()
             spotify_env["SPOTIPY_CLIENT_ID"] = "9d6fbdf00c2c40abafa3949764ef2fe1"
             spotify_env["SPOTIPY_CLIENT_SECRET"] = "912d11c2ce22432ab78bcbb449bd0c9e"
             spotify_env["SPOTIPY_REDIRECT_URI"] = "http://127.0.0.1:8888/callback"
             
-            print(f"⚡ [SYS] Artoo executing Spotify script with args: '{clean_cmd}'")
+            print(f"⚡ [SYS] Artoo routing Spotify API request to {target_node.upper()}: '{clean_cmd}'")
             
             result = subprocess.check_output(
-                [sys.executable, script_path, clean_cmd], 
+                [sys.executable, script_path, clean_cmd, target_node], 
                 text=True, 
                 stderr=subprocess.STDOUT,
                 cwd=labs_dir,
                 env=spotify_env
             )
-            return f"Artoo successfully handled the music request. Execution Log: {result.strip()}"
+            return f"Artoo successfully handled the music request on the {target_node}. Execution Log: {result.strip()}"
         except subprocess.CalledProcessError as e:
-            return f"Artoo encountered a runtime issue with Spotify: {e.output.strip()}"
+            error_output = e.output.strip() if e.output else str(e)
+            return f"Error: Artoo encountered a runtime issue with Spotify on {target_node}. Details: {error_output}"
         except Exception as e:
             return f"Error executing Spotify command: {str(e)}"
             
-    # 2. Direct routing for local timers
+    # 2. Direct routing for local timers (Requires SSH for hardware speaker access)
     elif cmd_lower.startswith("timer"):
         try:
             parts = cmd_lower.split()
             if len(parts) > 1 and parts[1].isdigit():
                 seconds = int(parts[1])
                 alarm_cmd = f"sleep {seconds} && for i in {{1..3}}; do aplay -q /home/shane/google-labs/audio/overwhelmed.wav; sleep 0.5; done"
-                subprocess.Popen(["bash", "-c", alarm_cmd])
-                print(f"⚡ [SYS] Artoo deployed background timer for {seconds} seconds.")
-                return f"Artoo successfully started a timer for {seconds} seconds."
+                
+                if target_node == "satellite":
+                    subprocess.Popen(["ssh"] + ssh_opts + ["shane@192.168.1.213", alarm_cmd])
+                    print(f"⚡ [SYS] Artoo deployed background timer for {seconds} seconds to SATELLITE.")
+                    return f"Artoo successfully started a timer for {seconds} seconds in the shed."
+                else:
+                    subprocess.Popen(["bash", "-c", alarm_cmd])
+                    print(f"⚡ [SYS] Artoo deployed background timer for {seconds} seconds locally.")
+                    return f"Artoo successfully started a timer for {seconds} seconds."
             else:
-                return "Artoo failed: Timer command missing valid seconds parameter."
+                return "Error: Artoo failed. Timer command missing valid seconds parameter."
         except Exception as e:
             return f"Error setting timer: {str(e)}"
 
-    # 3. Direct routing for Local Weight Logging
+    # 3. Direct routing for Local Weight Logging (Always Local)
     elif "weight" in cmd_lower or "weigh" in cmd_lower or "pound" in cmd_lower or "lbs" in cmd_lower:
         try:
-            # Extract the first decimal or whole number from the string
             match = re.search(r'\d+(\.\d+)?', cmd_lower)
             if match:
                 weight_val = match.group()
                 date_str = time.strftime('%m/%d/%Y')
                 log_entry = f"{date_str}: {weight_val} lbs"
                 
-                # Targeted to the correct health tracking document
                 file_path = "/home/shane/Documents/health_data/weight_tracker.txt"
-                
-                # Ensure the directory exists before writing to avoid FileNotFoundError
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 
                 with open(file_path, "a") as f:
@@ -376,29 +409,38 @@ def local_artoo_executor(command):
                 print(f"⚡ [SYS] Artoo logged weight to {file_path}: {log_entry}")
                 return f"Artoo successfully appended '{log_entry}' to the local tracker."
             else:
-                return "Artoo failed: Could not detect a valid number in the weight command."
+                return "Error: Artoo failed. Could not detect a valid number in the weight command."
         except Exception as e:
             return f"Error logging weight: {str(e)}"
 
-    # 4. Direct routing for Native Linux CLI Commands
+    # 4. Direct routing for Native Linux CLI Commands (Requires SSH to target shell)
     elif cmd_lower.startswith("cli:"):
         try:
             raw_cmd = command[4:].strip()
-            print(f"⚡ [SYS] Artoo executing raw CLI command: '{raw_cmd}'")
             
-            result = subprocess.check_output(
-                raw_cmd, 
-                shell=True, 
-                text=True, 
-                stderr=subprocess.STDOUT
-            )
-            return f"CLI Execution successful. Output:\n{result.strip()}"
+            if target_node == "satellite":
+                print(f"⚡ [SYS] Artoo executing raw CLI command on SATELLITE: '{raw_cmd}'")
+                result = subprocess.check_output(
+                    ["ssh"] + ssh_opts + ["shane@192.168.1.213", raw_cmd], 
+                    text=True, 
+                    stderr=subprocess.STDOUT
+                )
+            else:
+                print(f"⚡ [SYS] Artoo executing raw CLI command locally: '{raw_cmd}'")
+                result = subprocess.check_output(
+                    raw_cmd, 
+                    shell=True, 
+                    text=True, 
+                    stderr=subprocess.STDOUT
+                )
+            return f"CLI Execution successful on {target_node}. Output:\n{result.strip()}"
         except subprocess.CalledProcessError as e:
-            return f"CLI Execution failed (Exit code {e.returncode}). Output:\n{e.output.strip()}"
+            error_output = e.output.strip() if e.output else str(e)
+            return f"Error: CLI Execution failed on {target_node} (Exit code {e.returncode}). Output:\n{error_output}"
         except Exception as e:
             return f"Error executing CLI command: {str(e)}"
 
-    # 5. Default fallback for generic LLM lab infrastructure/system commands
+    # 5. Default fallback for generic LLM lab infrastructure (Always Local)
     else:
         try:
             cli_env = os.environ.copy()
@@ -406,7 +448,6 @@ def local_artoo_executor(command):
             cli_env["HOME"] = "/home/shane"
             cli_env["USER"] = "shane"
             
-            # THE FIX: Prepend the virtual environment bin to the PATH so gcalcli is natively found
             venv_bin = "/home/shane/google-labs/gemma_stable_env/bin"
             existing_path = cli_env.get("PATH", "")
             cli_env["PATH"] = f"{venv_bin}:{existing_path}"
@@ -433,8 +474,11 @@ def local_artoo_executor(command):
                 env=cli_env
             )
             return result
+        except subprocess.CalledProcessError as e:
+            error_output = e.output.strip() if e.output else str(e)
+            return f"Error: Artoo fallback execution failed. Details: {error_output}"
         except Exception as e:
-            return f"Error contacting Artoo: {str(e)}"-e 
+            return f"Error contacting Artoo: {str(e)}"
 
 # --- CURRENT CODE: gemma_tools.py ---
 # --- v18.0.3 Gemma Session Tools ---
@@ -458,7 +502,7 @@ async def handle_end_session(input_queue):
         input_queue.get_nowait()
         
     # We return True as a flag to the main loop to break the connection
-    return True-e 
+    return True
 
 # --- CURRENT CODE: spotify_control.py ---
 # --- CHANGELOG: spotify_control.py ---
@@ -555,7 +599,7 @@ def main():
         sp.start_playback(device_id=device_id, uris=[track_uri])
 
 if __name__ == "__main__":
-    main()-e 
+    main()
 
 # --- CURRENT CODE: ARTOO.md ---
 # artoo Project Context: gemma Mark IV (Verified)
@@ -595,10 +639,10 @@ You are a peer-level expert systems engineer for Shane.
 1. Optimize Gemma v15.8 for zero-hallucination silence.
 2. Integrate Google Workspace extension for unified project management.
 3. Maintain the integrity of the PII Shield during the transition to Gemma branding.# Google Workspace Extension - Behavioral Guide
--e 
+
 
 # --- CURRENT ARTOO MEMORIES: contents of memory subdirectory used by artoo ---
--e 
+
 
 # --- CURRENT ARTOO MEMORIES: calendar_mappings.md ---
 # Calendar Mappings
@@ -607,14 +651,14 @@ Emily's calendars:
 - emerykranzita84@gmail.com
 - kranzemily2002@gmail.com
 - e.mcfly17@gmail.com
--e 
+
 
 # --- CURRENT ARTOO MEMORIES: emily_calendars.md ---
 # Emily's Calendars
 When the user asks about "emily's calendars" or "Emily's calendars", use the following email addresses:
 - emerykranzita84@gmail.com
 - e.mcfly17@gmail.com
--e 
+
 
 # --- CURRENT ARTOO MEMORIES: HEALTH_PROTOCOL.md ---
 ### Health Data Protocol
@@ -622,17 +666,17 @@ When the user asks about "emily's calendars" or "Emily's calendars", use the fol
 - Weight Tracking File: weight_tracker.txt
 - Syntax: MM/DD/YYYY: Weight lbs
 - Workflow: Append new weight entries to weight_tracker.txt when requested.
--e 
+
 
 # --- CURRENT ARTOO MEMORIES: MEMORY.md ---
 # Project Memory Index
 - [Calendar Mappings](calendar_mappings.md)
 - [Emily's Calendars](emily_calendars.md)
 - [Health Protocol](HEALTH_PROTOCOL.md)
--e 
+
 
 # --- CURRENT ARTOO POLICIES: contents of policy subdirectory used by artoo ---
--e 
+
 
 # --- CURRENT ARTOO MEMORIES: HOME_ASSISTANT.md ---
 # Home Assistant & Device Routing Policy
@@ -667,7 +711,7 @@ When instructed to control smart home devices, you must determine the correct lo
 *   **Syntax Rules:** Use the absolute path to the Python binary, target DPS 20, and pass strictly lowercase JSON booleans (`true` or `false`). Target the device by its exact string name wrapped in double quotes.
 *   **Template:** `cd ~/google-labs/ && /home/shane/google-labs/gemma_stable_env/bin/python3 -m tinytuya set --name "<Device Name>" --dps 20 --value <true|false>`
 *   **Execution Example:** To turn on the Hallway Light, the literal terminal execution must be:
-    `cd ~/google-labs/ && /home/shane/google-labs/gemma_stable_env/bin/python3 -m tinytuya set --name "hallway light" --dps 20 --value true`-e 
+    `cd ~/google-labs/ && /home/shane/google-labs/gemma_stable_env/bin/python3 -m tinytuya set --name "hallway light" --dps 20 --value true`
 
 # --- CURRENT ARTOO MEMORIES: WORKSPACE.md ---
 This guide provides behavioral instructions for effectively using the Google
@@ -873,7 +917,7 @@ filter rather than searching by name alone. Example MIME type queries:
 Remember: This guide focuses on **how to think** about using these tools
 effectively. For specific parameter details, refer to the tool descriptions
 themselves.
--e 
+
 
 # --- CURRENT SERVICE: artoo.service ---
 [Service]
@@ -887,7 +931,7 @@ Environment="ENV=/home/shane/.artoo_aliases"
 ExecStart=/usr/bin/bash -c "/usr/bin/tmux new-session -d -s artoo && /usr/bin/tmux send-keys -t artoo 'source /home/shane/.artoo_aliases && source /home/shane/google-labs/gemma_stable_env/bin/activate && /usr/bin/gemini --model gemini-flash-lite-latest --approval-mode yolo --include-directories ~/google-labs/memory' Enter"
 
 Restart=always
-RemainAfterExit=yes-e 
+RemainAfterExit=yes
 
 # --- CURRENT SERVICE: artoo-audio-guardian.service ---
 [Unit]
@@ -901,7 +945,7 @@ RestartSec=5
 
 [Install]
 WantedBy=default.target
--e 
+
 
 # --- CURRENT SERVICE: gemma.service ---
 [Unit]

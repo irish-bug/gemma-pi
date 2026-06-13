@@ -4,60 +4,55 @@ import subprocess
 import time
 import re
 
-__version__ = "18.0.8"
+__version__ = "18.0.10"
 
 def local_artoo_executor(command, target_node="local"):
     """
     Executes local system commands parsed from Gemma's tool calls.
-    Version: 18.0.8
+    Version: 18.0.10
     
     CHANGELOG:
-    - v18.0.8: Added Spatial Node Routing (target_node parameter). Injected SSH execution for Spotify, Timers, and CLI commands when targeting the 'satellite' node in the shed.
+    - v18.0.10: Removed SSH dependency for Satellite Spotify routing. Now executes local spotify_control.py with target_node argument to utilize Spotify Connect cloud routing directly.
+    - v18.0.9: Fixed non-interactive SSH host key verification blocker by injecting StrictHostKeyChecking=no into all SSH subprocess calls. Reinforced error handling to return clean strings instead of unhandled exceptions, preventing WebSocket 1008 policy violation crashes.
+    - v18.0.8: Added Spatial Node Routing (target_node parameter). Injected SSH execution for Timers and CLI commands when targeting the 'satellite' node in the shed.
     - v18.0.7: Injected gemma_stable_env/bin into the fallback PATH so Artoo can natively find python-installed executables like gcalcli without searching the disk.
     - v18.0.6: Removed hardcoded calendar names. Instructed Artoo to explicitly read his MEMORY.md file to resolve calendar ownership before running gcalcli.
     """
     cmd_lower = command.lower()
     
-    # 1. Direct routing for local music/album playback & stopping
+    # Common SSH arguments to bypass strict host key checking in non-interactive subprocesses
+    ssh_opts = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
+    
+    # 1. Direct routing for local music/album playback & stopping (Uses Spotify Cloud API)
     if "album" in cmd_lower or "play" in cmd_lower or "stop music" in cmd_lower or "stop" in cmd_lower:
         try:
             clean_cmd = command.lower().replace("tell artoo", "").strip()
             
-            if target_node == "satellite":
-                print(f"⚡ [SYS] Artoo routing Spotify request to SATELLITE (Shed): '{clean_cmd}'")
-                # Assumes spotify_control.py is also located at ~/google-labs on the Pi Zero
-                result = subprocess.check_output(
-                    ["ssh", "shane@192.168.1.213", "python3", "/home/shane/google-labs/spotify_control.py", clean_cmd],
-                    text=True, 
-                    stderr=subprocess.STDOUT
-                )
-                return f"Artoo successfully handled the music request on the satellite. Execution Log: {result.strip()}"
-                
-            else:
-                labs_dir = os.path.expanduser("~/google-labs")
-                script_path = os.path.join(labs_dir, "spotify_control.py")
-                
-                spotify_env = os.environ.copy()
-                spotify_env["SPOTIPY_CLIENT_ID"] = "9d6fbdf00c2c40abafa3949764ef2fe1"
-                spotify_env["SPOTIPY_CLIENT_SECRET"] = "912d11c2ce22432ab78bcbb449bd0c9e"
-                spotify_env["SPOTIPY_REDIRECT_URI"] = "http://127.0.0.1:8888/callback"
-                
-                print(f"⚡ [SYS] Artoo executing Spotify script locally with args: '{clean_cmd}'")
-                
-                result = subprocess.check_output(
-                    [sys.executable, script_path, clean_cmd], 
-                    text=True, 
-                    stderr=subprocess.STDOUT,
-                    cwd=labs_dir,
-                    env=spotify_env
-                )
-                return f"Artoo successfully handled the local music request. Execution Log: {result.strip()}"
+            labs_dir = os.path.expanduser("~/google-labs")
+            script_path = os.path.join(labs_dir, "spotify_control.py")
+            
+            spotify_env = os.environ.copy()
+            spotify_env["SPOTIPY_CLIENT_ID"] = "9d6fbdf00c2c40abafa3949764ef2fe1"
+            spotify_env["SPOTIPY_CLIENT_SECRET"] = "912d11c2ce22432ab78bcbb449bd0c9e"
+            spotify_env["SPOTIPY_REDIRECT_URI"] = "http://127.0.0.1:8888/callback"
+            
+            print(f"⚡ [SYS] Artoo routing Spotify API request to {target_node.upper()}: '{clean_cmd}'")
+            
+            result = subprocess.check_output(
+                [sys.executable, script_path, clean_cmd, target_node], 
+                text=True, 
+                stderr=subprocess.STDOUT,
+                cwd=labs_dir,
+                env=spotify_env
+            )
+            return f"Artoo successfully handled the music request on the {target_node}. Execution Log: {result.strip()}"
         except subprocess.CalledProcessError as e:
-            return f"Artoo encountered a runtime issue with Spotify on {target_node}: {e.output.strip()}"
+            error_output = e.output.strip() if e.output else str(e)
+            return f"Error: Artoo encountered a runtime issue with Spotify on {target_node}. Details: {error_output}"
         except Exception as e:
             return f"Error executing Spotify command: {str(e)}"
             
-    # 2. Direct routing for local timers
+    # 2. Direct routing for local timers (Requires SSH for hardware speaker access)
     elif cmd_lower.startswith("timer"):
         try:
             parts = cmd_lower.split()
@@ -66,7 +61,7 @@ def local_artoo_executor(command, target_node="local"):
                 alarm_cmd = f"sleep {seconds} && for i in {{1..3}}; do aplay -q /home/shane/google-labs/audio/overwhelmed.wav; sleep 0.5; done"
                 
                 if target_node == "satellite":
-                    subprocess.Popen(["ssh", "shane@192.168.1.213", alarm_cmd])
+                    subprocess.Popen(["ssh"] + ssh_opts + ["shane@192.168.1.213", alarm_cmd])
                     print(f"⚡ [SYS] Artoo deployed background timer for {seconds} seconds to SATELLITE.")
                     return f"Artoo successfully started a timer for {seconds} seconds in the shed."
                 else:
@@ -74,7 +69,7 @@ def local_artoo_executor(command, target_node="local"):
                     print(f"⚡ [SYS] Artoo deployed background timer for {seconds} seconds locally.")
                     return f"Artoo successfully started a timer for {seconds} seconds."
             else:
-                return "Artoo failed: Timer command missing valid seconds parameter."
+                return "Error: Artoo failed. Timer command missing valid seconds parameter."
         except Exception as e:
             return f"Error setting timer: {str(e)}"
 
@@ -96,11 +91,11 @@ def local_artoo_executor(command, target_node="local"):
                 print(f"⚡ [SYS] Artoo logged weight to {file_path}: {log_entry}")
                 return f"Artoo successfully appended '{log_entry}' to the local tracker."
             else:
-                return "Artoo failed: Could not detect a valid number in the weight command."
+                return "Error: Artoo failed. Could not detect a valid number in the weight command."
         except Exception as e:
             return f"Error logging weight: {str(e)}"
 
-    # 4. Direct routing for Native Linux CLI Commands
+    # 4. Direct routing for Native Linux CLI Commands (Requires SSH to target shell)
     elif cmd_lower.startswith("cli:"):
         try:
             raw_cmd = command[4:].strip()
@@ -108,7 +103,7 @@ def local_artoo_executor(command, target_node="local"):
             if target_node == "satellite":
                 print(f"⚡ [SYS] Artoo executing raw CLI command on SATELLITE: '{raw_cmd}'")
                 result = subprocess.check_output(
-                    ["ssh", "shane@192.168.1.213", raw_cmd], 
+                    ["ssh"] + ssh_opts + ["shane@192.168.1.213", raw_cmd], 
                     text=True, 
                     stderr=subprocess.STDOUT
                 )
@@ -122,7 +117,8 @@ def local_artoo_executor(command, target_node="local"):
                 )
             return f"CLI Execution successful on {target_node}. Output:\n{result.strip()}"
         except subprocess.CalledProcessError as e:
-            return f"CLI Execution failed on {target_node} (Exit code {e.returncode}). Output:\n{e.output.strip()}"
+            error_output = e.output.strip() if e.output else str(e)
+            return f"Error: CLI Execution failed on {target_node} (Exit code {e.returncode}). Output:\n{error_output}"
         except Exception as e:
             return f"Error executing CLI command: {str(e)}"
 
@@ -160,5 +156,8 @@ def local_artoo_executor(command, target_node="local"):
                 env=cli_env
             )
             return result
+        except subprocess.CalledProcessError as e:
+            error_output = e.output.strip() if e.output else str(e)
+            return f"Error: Artoo fallback execution failed. Details: {error_output}"
         except Exception as e:
             return f"Error contacting Artoo: {str(e)}"

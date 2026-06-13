@@ -25,4 +25,13 @@ artoo_ops.log
 __pycache__/
 old/
 memory/
+hailo/
+spotify_api/
 HOME_ASSISTANT.md
+artoo_rag.py
+build_db.py
+ask_artoo.pyartoo_rag.py
+ask_artoo.py
+build_db.py
+hailo/
+spotify_api/
