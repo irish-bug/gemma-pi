@@ -1,8 +1,8 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.2.14 Gemma Live: Spatial Multi-Node Audio (Node-Aware Tools) ---
+# --- v18.2.15 Gemma Live: Spatial Multi-Node Audio (Node-Aware Tools) ---
 # Change Message:
+# - v18.2.15: Implemented Self-Healing TCP architecture. Decoupled the satellite socket connection from the main boot sequence. Added an async auto-recovery loop so the Pi 5 survives shed reboots/disconnects without crashing the main service.
 # - v18.2.14: Injected strict anti-hallucination constraints into the run_artoo_cmd schema to forbid Python syntax (e.g., play_music()) and enforce plain text command parameters.
-# - v18.2.13: Injected current_node context into the Gemini system prompt. Updated run_artoo_cmd tool schema to require a target_node string. Passed target_node argument down to the local_artoo_executor thread.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -37,6 +37,10 @@ last_activity_time = time.time()
 is_tool_running = False 
 active_node = None 
 
+# Dynamic connection state variables
+satellite_connected = False
+spk_writer = None
+
 # --- 2. LOCAL ANKER HANDLERS ---
 def mic_callback(indata, frames, time_info, status):
     downsampled = indata[::IN_RATIO].copy()
@@ -57,8 +61,8 @@ def spk_callback(outdata, frames, time_info, status):
             is_gemma_outputting_sound = False 
 
 # --- 3. THE LIVE BRAIN ---
-async def start_gemini_session(spk_writer, current_node):
-    global last_activity_time, satellite_tts_end_time
+async def start_gemini_session(current_node):
+    global last_activity_time, satellite_tts_end_time, spk_writer, satellite_connected
     last_activity_time = time.time()
     uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={API_KEY}"
     user_context = os.environ.get("USER_CONTEXT", "User is a human interacting via voice.")
@@ -109,7 +113,7 @@ async def start_gemini_session(spk_writer, current_node):
                         return 
 
             async def receive_loop():
-                global last_activity_time, is_tool_running, output_buffer, satellite_tts_end_time
+                global last_activity_time, is_tool_running, output_buffer, satellite_tts_end_time, spk_writer, satellite_connected
                 async for message in ws:
                     msg = json.loads(message)
                     last_activity_time = time.time()
@@ -131,7 +135,6 @@ async def start_gemini_session(spk_writer, current_node):
                                 print(f"[*] Waiting for Artoo to execute on [{target_node.upper()}]...")
                                 is_tool_running = True
                                 
-                                # Passes the new target_node argument to your tools file
                                 execution_result = await asyncio.to_thread(local_artoo_executor, cmd_args, target_node)
                                 
                                 is_tool_running, last_activity_time = False, time.time() 
@@ -142,17 +145,22 @@ async def start_gemini_session(spk_writer, current_node):
                             if "inlineData" in part:
                                 raw = base64.b64decode(part["inlineData"]["data"])
                                 if current_node == "satellite":
-                                    audio_16 = np.frombuffer(raw, dtype=np.int16)
-                                    chunk_to_send = (audio_16 * SATELLITE_OUT_BOOST).astype(np.int16)
-                                    spk_writer.write(chunk_to_send.tobytes())
-                                    await spk_writer.drain()
-                                    
-                                    duration = len(chunk_to_send) / 24000.0
-                                    current = time.time()
-                                    if satellite_tts_end_time < current:
-                                        satellite_tts_end_time = current + duration + 0.3 
-                                    else:
-                                        satellite_tts_end_time += duration
+                                    if satellite_connected and spk_writer:
+                                        try:
+                                            audio_16 = np.frombuffer(raw, dtype=np.int16)
+                                            chunk_to_send = (audio_16 * SATELLITE_OUT_BOOST).astype(np.int16)
+                                            spk_writer.write(chunk_to_send.tobytes())
+                                            await spk_writer.drain()
+                                            
+                                            duration = len(chunk_to_send) / 24000.0
+                                            current = time.time()
+                                            if satellite_tts_end_time < current:
+                                                satellite_tts_end_time = current + duration + 0.3 
+                                            else:
+                                                satellite_tts_end_time += duration
+                                        except Exception as e:
+                                            print(f"\n[!] Dropped chunk. Shack pipe disconnected: {e}")
+                                            satellite_connected = False
                                         
                                 elif current_node == "local":
                                     audio_up = np.repeat(np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32767.0, OUT_RATIO)
@@ -167,49 +175,44 @@ async def start_gemini_session(spk_writer, current_node):
     except Exception as e: print(f"\n[!] Session Closed: {e}")
 
 async def main():
-    global loop, is_gemma_outputting_sound, active_node, satellite_tts_end_time
+    global loop, is_gemma_outputting_sound, active_node, satellite_tts_end_time, spk_writer, satellite_connected
     loop = asyncio.get_running_loop()
     
     local_oww = Model(wakeword_models=["models/hey_gemma.onnx"], inference_framework="onnx")
     satellite_oww = Model(wakeword_models=["models/hey_gemma.onnx"], inference_framework="onnx")
     
     try:
-        print("[*] Booting hardware streams (Anker S500)...")
+        print("[*] Booting local hardware streams (Anker S500)...")
         with sd.InputStream(device="default", channels=1, samplerate=HW_FS, callback=mic_callback, blocksize=3840), \
              sd.OutputStream(device="default", channels=1, samplerate=HW_FS, callback=spk_callback, blocksize=1024):
             
-            try:
-                print("[*] Connecting to Shack Mic (Port 10700)...")
-                mic_reader, mic_writer = await asyncio.open_connection('192.168.1.213', 10700)
-                print("[*] Connecting to Shack Speaker (Port 10701)...")
-                spk_reader, spk_writer = await asyncio.open_connection('192.168.1.213', 10701)
-            except Exception as e:
-                print(f"[!] Failed to connect to Shack TCP pipes: {e}")
-                return
-                
-            print(f"[*] Gemma Listening (Anker S500 + Shack TCP Pipes)...")
+            print(f"[*] Gemma Local Listening Active. Satellite recovery loop starting in background...")
             active_node = None
 
             async def run_session_flow():
-                global is_gemma_outputting_sound, active_node, satellite_tts_end_time
+                global is_gemma_outputting_sound, active_node, satellite_tts_end_time, spk_writer, satellite_connected
                 print(f"\n[!] Wake Word Locked on Node: [{active_node.upper()}]")
                 is_gemma_outputting_sound = True
                 if active_node == "local": 
                     subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
                 elif active_node == "satellite":
-                    chat_wav = np.fromfile("/home/shane/google-labs/audio/chat.wav", dtype=np.int16)[22:]
-                    chunk_to_send = (chat_wav * SATELLITE_OUT_BOOST).astype(np.int16)
-                    spk_writer.write(chunk_to_send.tobytes())
-                    await spk_writer.drain()
-                    satellite_tts_end_time = time.time() + (len(chunk_to_send) / 24000.0) + 0.3
+                    if satellite_connected and spk_writer:
+                        try:
+                            chat_wav = np.fromfile("/home/shane/google-labs/audio/chat.wav", dtype=np.int16)[22:]
+                            chunk_to_send = (chat_wav * SATELLITE_OUT_BOOST).astype(np.int16)
+                            spk_writer.write(chunk_to_send.tobytes())
+                            await spk_writer.drain()
+                            satellite_tts_end_time = time.time() + (len(chunk_to_send) / 24000.0) + 0.3
+                        except Exception as e:
+                            print(f"\n[!] Failed to play ack tone. Shack disconnected: {e}")
+                            satellite_connected = False
                     
                 is_gemma_outputting_sound = False
                 
                 while not input_queue.empty(): input_queue.get_nowait()
                 while not local_mic_queue.empty(): local_mic_queue.get_nowait()
                 
-                # Passing the hardware context into the API session
-                await start_gemini_session(spk_writer, active_node)
+                await start_gemini_session(active_node)
                 
                 print("[*] Cooling down...")
                 end_time = time.time() + 5
@@ -236,45 +239,58 @@ async def main():
                 except Exception as e: print(f"\n[!] LOCAL THREAD CRASH: {e}")
 
             async def satellite_listener():
-                global active_node, is_gemma_outputting_sound, satellite_tts_end_time
-                satellite_buffer = np.array([], dtype=np.int16)
-                chunk_count = 0
-                try:
-                    while True:
-                        raw_bytes = await mic_reader.read(4096)
-                        if not raw_bytes:
-                            print("[!] Shack Mic Stream Closed.")
-                            break
+                global active_node, is_gemma_outputting_sound, satellite_tts_end_time, spk_writer, satellite_connected
+                while True:
+                    if not satellite_connected:
+                        try:
+                            mic_reader, mic_writer = await asyncio.open_connection('192.168.1.213', 10700)
+                            spk_reader, spk_writer = await asyncio.open_connection('192.168.1.213', 10701)
+                            satellite_connected = True
+                            print("\n[*] 📡 Shack TCP Pipes Connected Successfully!")
+                        except Exception:
+                            # Silently retry every 5 seconds without spamming the log
+                            await asyncio.sleep(5)
+                            continue
+
+                    # If connected, listen for chunks
+                    satellite_buffer = np.array([], dtype=np.int16)
+                    chunk_count = 0
+                    try:
+                        while satellite_connected:
+                            raw_bytes = await mic_reader.read(4096)
+                            if not raw_bytes:
+                                print("\n[!] Shack Mic Stream Closed. Entering auto-recovery...")
+                                satellite_connected = False
+                                break
+                                
+                            chunk_count += 1
+                            if len(raw_bytes) % 2 != 0: raw_bytes = raw_bytes[:-1]
+                            audio_int16 = np.frombuffer(raw_bytes, dtype=np.int16)
                             
-                        chunk_count += 1
-                        if len(raw_bytes) % 2 != 0: raw_bytes = raw_bytes[:-1]
-                        audio_int16 = np.frombuffer(raw_bytes, dtype=np.int16)
-                        
-                        if chunk_count == 1:
-                            print(f"[*] 📡 Shack TCP Pipe Open: First chunk received ({len(raw_bytes)} bytes)")
-                        
-                        mute_satellite = time.time() < satellite_tts_end_time
-                        
-                        if active_node == "satellite":
-                            audio_fp32 = audio_int16.astype(np.float32) / 32767.0
-                            if mute_satellite: audio_fp32.fill(0.0)
-                            await input_queue.put(audio_fp32.reshape(-1, 1))
-                        elif active_node is None and not mute_satellite:
-                            satellite_buffer = np.concatenate((satellite_buffer, audio_int16))
-                            while len(satellite_buffer) >= 1280:
-                                frame, satellite_buffer = satellite_buffer[:1280], satellite_buffer[1280:]
-                                if satellite_oww.predict(frame)["hey_gemma"] > 0.70:
-                                    active_node = "satellite"
-                                    loop.create_task(run_session_flow())
-                                    satellite_buffer = np.array([], dtype=np.int16)
-                                    break
-                except Exception as e: print(f"\n[!] SATELLITE THREAD CRASH: {e}")
+                            mute_satellite = time.time() < satellite_tts_end_time
+                            
+                            if active_node == "satellite":
+                                audio_fp32 = audio_int16.astype(np.float32) / 32767.0
+                                if mute_satellite: audio_fp32.fill(0.0)
+                                await input_queue.put(audio_fp32.reshape(-1, 1))
+                            elif active_node is None and not mute_satellite:
+                                satellite_buffer = np.concatenate((satellite_buffer, audio_int16))
+                                while len(satellite_buffer) >= 1280:
+                                    frame, satellite_buffer = satellite_buffer[:1280], satellite_buffer[1280:]
+                                    if satellite_oww.predict(frame)["hey_gemma"] > 0.70:
+                                        active_node = "satellite"
+                                        loop.create_task(run_session_flow())
+                                        satellite_buffer = np.array([], dtype=np.int16)
+                                        break
+                    except Exception as e: 
+                        print(f"\n[!] Shack Connection Lost ({e}). Entering auto-recovery...")
+                        satellite_connected = False
 
             asyncio.create_task(local_listener())
             asyncio.create_task(satellite_listener())
             while True: await asyncio.sleep(1)
                     
-    except Exception as e: print(f"[!] Stream failure: {e}")
+    except Exception as e: print(f"[!] Critical Stream failure: {e}")
 
 if __name__ == "__main__":
     try: asyncio.run(main())
