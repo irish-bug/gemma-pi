@@ -37,7 +37,7 @@ run:
 commit:
 	@make test
 	@git add .
-	@git commit -m "$(if $(msg),$(msg),Auto-commit: $(shell date +'%Y-%m-%d %H:%M:%S'))"
+	@bash -c 'read -p "Enter commit message: " msg; git commit -m "$$msg"'
 	@echo "Pushing validated architecture to GitHub..."
 	@git push
 	@echo "Deployment to cloud repository complete."

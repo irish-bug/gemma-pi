@@ -1,9 +1,8 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.2.13 Gemma Live: Spatial Multi-Node Audio (Node-Aware Tools) ---
+# --- v18.2.14 Gemma Live: Spatial Multi-Node Audio (Node-Aware Tools) ---
 # Change Message:
-# - Injected current_node context into the Gemini system prompt.
-# - Updated run_artoo_cmd tool schema to require a target_node string.
-# - Passed target_node argument down to the local_artoo_executor thread.
+# - v18.2.14: Injected strict anti-hallucination constraints into the run_artoo_cmd schema to forbid Python syntax (e.g., play_music()) and enforce plain text command parameters.
+# - v18.2.13: Injected current_node context into the Gemini system prompt. Updated run_artoo_cmd tool schema to require a target_node string. Passed target_node argument down to the local_artoo_executor thread.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -75,12 +74,12 @@ async def start_gemini_session(spk_writer, current_node):
                         {"functionDeclarations": [
                             {
                                 "name": "run_artoo_cmd", 
-                                "description": "Run lab commands, control music, set a timer, or execute raw Bash CLI commands.", 
+                                "description": "Run lab commands, control music, set a timer, or execute raw Bash CLI commands. CRITICAL: For music, the command MUST be plain text (e.g., 'play album abbey road', 'play track let it be', 'stop'). NEVER use python syntax or fake functions like play_music().", 
                                 "parameters": {
                                     "type": "object", 
                                     "properties": {
-                                        "command": {"type": "string"},
-                                        "target_node": {"type": "string", "description": "The execution node ('local' or 'satellite')."}
+                                        "command": {"type": "string", "description": "The plain text command to execute."},
+                                        "target_node": {"type": "string", "description": "The execution node ('local', 'satellite', or 'chores')."}
                                     }, 
                                     "required": ["command", "target_node"]
                                 }
