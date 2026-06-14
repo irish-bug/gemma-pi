@@ -1,9 +1,22 @@
-# --- v18.0.3 Gemma Session Tools ---
+# --- v18.0.4 Gemma Session Tools ---
 # This module contains specific tools that control the lifecycle 
 # and behavior of the Gemma Live websocket session itself, 
 # completely isolated from Artoo's OS-level executions.
 
 import asyncio
+
+# Global reference set to protect tasks from the Garbage Collector
+background_tasks = set()
+
+def create_bg_task(loop, coro):
+    """
+    Wraps task creation to maintain a strong reference, preventing GC destruction.
+    Passes the active asyncio event loop to ensure thread-safe creation.
+    """
+    task = loop.create_task(coro)
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
+    return task
 
 async def handle_end_session(input_queue):
     """

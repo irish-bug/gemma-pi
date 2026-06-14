@@ -1,21 +1,21 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.2.16 Gemma Live: Spatial Multi-Node Audio (Node-Aware Tools) ---
+# --- v18.2.17 Gemma Live: Spatial Multi-Node Audio (Node-Aware Tools) ---
 # Change Message:
-# - v18.2.16: Fixed Task Destruction Bug (1011 crash). Replaced blocking sleep loops with asyncio.Event() flags to cleanly pause background listeners while the Gemini session holds the mic lock.
+# - v18.2.17: Extracted Garbage Collection (GC) task manager to gemma_tools.py to improve code modularity. 
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
 import sounddevice as sd
 
-os.environ["ORT_LOG_SEVERITY_LEVEL"] = "3"
+os.environ["ORT_LOG_SEVERITY_LEVEL"] = "4"
 import onnxruntime as ort
 from openwakeword.model import Model
 
 from artoo_tools import local_artoo_executor
-from gemma_tools import handle_end_session
+from gemma_tools import handle_end_session, create_bg_task
 
 # --- 1. CONFIG ---
-ort.set_default_logger_severity(3)
+ort.set_default_logger_severity(4)
 API_KEY = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
 MODEL = "gemini-2.5-flash-native-audio-latest"
 VOICE = "Aoede"
@@ -39,7 +39,7 @@ active_node = None
 satellite_connected = False
 spk_writer = None
 
-# Global event flag to cleanly pause wake-word listeners
+# Event flag to cleanly pause wake-word listeners
 session_active_event = asyncio.Event()
 
 # --- 2. LOCAL ANKER HANDLERS ---
@@ -169,6 +169,7 @@ async def start_gemini_session(current_node):
                             if "text" in part: 
                                 print(f"\n[Gemma's Thoughts]: {part['text'].strip()}", flush=True) 
 
+            # asyncio.wait holds strong references naturally during the block, so these are safe.
             done, pending = await asyncio.wait([asyncio.create_task(send_loop()), asyncio.create_task(receive_loop())], return_when=asyncio.FIRST_COMPLETED)
             for task in pending: task.cancel() 
 
@@ -220,7 +221,7 @@ async def main():
                 await start_gemini_session(active_node)
                 
                 print("[*] Cooling down...")
-                await asyncio.sleep(5) # Clean asyncio wait instead of blocking while loop
+                await asyncio.sleep(5) 
                 
                 while not input_queue.empty(): input_queue.get_nowait()
                 
@@ -245,7 +246,7 @@ async def main():
                         if not is_gemma_outputting_sound:
                             if local_oww.predict((indata * 32767).astype(np.int16).flatten())["hey_gemma"] > 0.70:
                                 active_node = "local"
-                                loop.create_task(run_session_flow())
+                                create_bg_task(loop, run_session_flow())
                 except Exception as e: print(f"\n[!] LOCAL THREAD CRASH: {e}")
 
             async def satellite_listener():
@@ -290,15 +291,21 @@ async def main():
                                     frame, satellite_buffer = satellite_buffer[:1280], satellite_buffer[1280:]
                                     if satellite_oww.predict(frame)["hey_gemma"] > 0.70:
                                         active_node = "satellite"
-                                        loop.create_task(run_session_flow())
+                                        create_bg_task(loop, run_session_flow())
                                         satellite_buffer = np.array([], dtype=np.int16)
                                         break
                     except Exception as e: 
                         print(f"\n[!] Shack Connection Lost ({e}). Entering auto-recovery...")
                         satellite_connected = False
+                        # Cleanly close dangling socket writers
+                        if spk_writer:
+                            try: spk_writer.close()
+                            except: pass
 
-            asyncio.create_task(local_listener())
-            asyncio.create_task(satellite_listener())
+            # Boot the listeners under GC protection, passing the loop explicitly
+            create_bg_task(loop, local_listener())
+            create_bg_task(loop, satellite_listener())
+            
             while True: await asyncio.sleep(1)
                     
     except Exception as e: print(f"[!] Critical Stream failure: {e}")
