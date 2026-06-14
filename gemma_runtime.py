@@ -1,8 +1,7 @@
 #!//home/shane/google-labs/gemma_stable_env/bin/python
-# --- v18.2.15 Gemma Live: Spatial Multi-Node Audio (Node-Aware Tools) ---
+# --- v18.2.16 Gemma Live: Spatial Multi-Node Audio (Node-Aware Tools) ---
 # Change Message:
-# - v18.2.15: Implemented Self-Healing TCP architecture. Decoupled the satellite socket connection from the main boot sequence. Added an async auto-recovery loop so the Pi 5 survives shed reboots/disconnects without crashing the main service.
-# - v18.2.14: Injected strict anti-hallucination constraints into the run_artoo_cmd schema to forbid Python syntax (e.g., play_music()) and enforce plain text command parameters.
+# - v18.2.16: Fixed Task Destruction Bug (1011 crash). Replaced blocking sleep loops with asyncio.Event() flags to cleanly pause background listeners while the Gemini session holds the mic lock.
 
 import asyncio, base64, json, os, sys, websockets, threading, time, subprocess
 import numpy as np
@@ -37,9 +36,11 @@ last_activity_time = time.time()
 is_tool_running = False 
 active_node = None 
 
-# Dynamic connection state variables
 satellite_connected = False
 spk_writer = None
+
+# Global event flag to cleanly pause wake-word listeners
+session_active_event = asyncio.Event()
 
 # --- 2. LOCAL ANKER HANDLERS ---
 def mic_callback(indata, frames, time_info, status):
@@ -191,7 +192,11 @@ async def main():
 
             async def run_session_flow():
                 global is_gemma_outputting_sound, active_node, satellite_tts_end_time, spk_writer, satellite_connected
+                
+                # Flag the system as 'busy' so listeners pause
+                session_active_event.set()
                 print(f"\n[!] Wake Word Locked on Node: [{active_node.upper()}]")
+                
                 is_gemma_outputting_sound = True
                 if active_node == "local": 
                     subprocess.run(["aplay", "-q", "/home/shane/google-labs/audio/ack.wav"], check=False)
@@ -215,24 +220,29 @@ async def main():
                 await start_gemini_session(active_node)
                 
                 print("[*] Cooling down...")
-                end_time = time.time() + 5
-                while time.time() < end_time:
-                    while not input_queue.empty(): input_queue.get_nowait()
-                    await asyncio.sleep(0.1)
-                    
+                await asyncio.sleep(5) # Clean asyncio wait instead of blocking while loop
+                
+                while not input_queue.empty(): input_queue.get_nowait()
+                
                 local_oww.reset()
                 satellite_oww.reset()
                 print(f"[*] Listener re-armed. Released source lock from: [{active_node}]")
                 active_node = None
+                
+                # Unpause the listeners
+                session_active_event.clear()
 
             async def local_listener():
                 global active_node
                 try:
                     while True:
                         indata = await local_mic_queue.get()
-                        if active_node == "local":
-                            await input_queue.put(indata)
-                        elif active_node is None and not is_gemma_outputting_sound:
+                        if session_active_event.is_set():
+                            if active_node == "local":
+                                await input_queue.put(indata)
+                            continue
+
+                        if not is_gemma_outputting_sound:
                             if local_oww.predict((indata * 32767).astype(np.int16).flatten())["hey_gemma"] > 0.70:
                                 active_node = "local"
                                 loop.create_task(run_session_flow())
@@ -248,11 +258,9 @@ async def main():
                             satellite_connected = True
                             print("\n[*] 📡 Shack TCP Pipes Connected Successfully!")
                         except Exception:
-                            # Silently retry every 5 seconds without spamming the log
                             await asyncio.sleep(5)
                             continue
 
-                    # If connected, listen for chunks
                     satellite_buffer = np.array([], dtype=np.int16)
                     chunk_count = 0
                     try:
@@ -269,11 +277,14 @@ async def main():
                             
                             mute_satellite = time.time() < satellite_tts_end_time
                             
-                            if active_node == "satellite":
-                                audio_fp32 = audio_int16.astype(np.float32) / 32767.0
-                                if mute_satellite: audio_fp32.fill(0.0)
-                                await input_queue.put(audio_fp32.reshape(-1, 1))
-                            elif active_node is None and not mute_satellite:
+                            if session_active_event.is_set():
+                                if active_node == "satellite":
+                                    audio_fp32 = audio_int16.astype(np.float32) / 32767.0
+                                    if mute_satellite: audio_fp32.fill(0.0)
+                                    await input_queue.put(audio_fp32.reshape(-1, 1))
+                                continue
+
+                            if active_node is None and not mute_satellite:
                                 satellite_buffer = np.concatenate((satellite_buffer, audio_int16))
                                 while len(satellite_buffer) >= 1280:
                                     frame, satellite_buffer = satellite_buffer[:1280], satellite_buffer[1280:]
