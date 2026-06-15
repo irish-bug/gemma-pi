@@ -54,7 +54,8 @@ def local_artoo_executor(command: str, target_node: str = "local") -> str:
                 weight_val = match.group()
                 date_str = datetime.now().strftime("%m/%d/%Y")
                 log_entry = f"{date_str}: {weight_val} lbs"
-                file_path = "/home/shane/Documents/health_data/weight_tracker.txt"
+                # Updated path to be relative to the memory directory
+                file_path = os.path.join(os.path.dirname(__file__), "memory", "weight_tracker.txt")
                 with open(file_path, "a") as f:
                     f.write(log_entry + "\n")
                 print(f"⚡ [SYS] Artoo logged weight to {file_path}: {log_entry}")

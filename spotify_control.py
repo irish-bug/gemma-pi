@@ -1,18 +1,16 @@
-#!/home/shane/google-labs/gemma_stable_env/bin/python
+#!/usr/bin/env python3
 import sys
 import os
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 # --- CHANGELOG: spotify_control.py ---
-# Fix 11: Swallowed librespot false-positive. Added a try/except block around start_playback to catch and ignore the 403 "Restriction violated" error that librespot clients throw after successfully starting a stream. Ensures Artoo receives a clean "Success" string.
-# Fix 10: Brute-Force Device Matching. Removed the TARGET_NAMES dictionary abstraction. The script now performs a direct, case-insensitive substring search of the network devices using whatever target_node string Artoo passes it.
-# Fix 9: Substring matching (depreciated).
-# Fix 8: Externalized credentials to .env.
+# Fix 12: Portability refactor - used relative paths and sys.executable.
 
 def load_local_env():
-    """Parses gemma_stable_env/.env manually to prevent dependency issues."""
-    env_path = "/home/shane/google-labs/gemma_stable_env/.env"
+    """Parses .env manually to prevent dependency issues."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    env_path = os.path.join(base_dir, "gemma_stable_env", ".env")
     if not os.path.exists(env_path):
         print(f"Error: Environment file not found at {env_path}")
         sys.exit(1)
@@ -59,14 +57,18 @@ def main():
         print("Error: Missing credentials in .env")
         sys.exit(1)
 
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    cache_path = os.path.join(base_dir, ".cache")
+
     sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
         client_id=CLIENT_ID,
         client_secret=CLIENT_SECRET,
         redirect_uri=REDIRECT_URI,
         scope="user-modify-playback-state user-read-playback-state user-read-playback-position",
-        cache_path="/home/shane/google-labs/.cache",
+        cache_path=cache_path,
         open_browser=False
     ))
+
 
     # --- THE BRUTE-FORCE DEVICE DISCOVERY ---
     devices = sp.devices().get('devices', [])
