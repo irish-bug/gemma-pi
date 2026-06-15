@@ -3,10 +3,12 @@ import json
 import sys
 
 def control_light(name, state):
-    with open('tinytuya.json', 'r') as f:
+    config_path = os.path.join(os.path.dirname(__file__), "config", "tinytuya.json")
+    with open(config_path, 'r') as f:
         config = json.load(f)
     
-    with open('tuya-raw.json', 'r') as f:
+    config_path = os.path.join(os.path.dirname(__file__), "config", "tuya-raw.json")
+    with open(config_path, 'r') as f:
         devices = json.load(f)
     
     device_id = None
