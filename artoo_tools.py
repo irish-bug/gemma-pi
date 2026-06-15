@@ -5,6 +5,8 @@
 
 import subprocess
 import json
+import re
+from datetime import datetime
 
 def local_artoo_executor(command: str, target_node: str = "local") -> str:
     """
@@ -42,18 +44,36 @@ def local_artoo_executor(command: str, target_node: str = "local") -> str:
     # As per HOME_ASSISTANT.md policy, Artoo handles these locally without cloud APIs
     elif "light" in command or "plug" in command or "turn" in command:
         print(f"⚡ [SYS] Artoo routing Home Assistant request: '{command}'")
-        # TODO: Insert your specific Kasa/Tinytuya execution scripts here.
-        # Example structure:
-        # output = subprocess.check_output(["python", "smart_home_control.py", command], text=True)
-        # return output
         return f"Simulated Home Assistant success for command: {command}"
 
-    # --- 3. RAW SYSTEM / LAB COMMANDS ---
+    # --- 3. DEDICATED LOCAL WEIGHT LOGGING ---
+    elif "weight" in command or "weigh" in command or "pound" in command or "lbs" in command:
+        try:
+            match = re.search(r'\d+(\.\d+)?', command)
+            if match:
+                weight_val = match.group()
+                date_str = datetime.now().strftime("%m/%d/%Y")
+                log_entry = f"{date_str}: {weight_val} lbs"
+                file_path = "/home/shane/Documents/health_data/weight_tracker.txt"
+                with open(file_path, "a") as f:
+                    f.write(log_entry + "\n")
+                print(f"⚡ [SYS] Artoo logged weight to {file_path}: {log_entry}")
+                return f"Successfully logged weight: {weight_val} lbs."
+            else:
+                return "Artoo failed: Could not detect a valid number in the weight command."
+        except Exception as e:
+            return f"Error logging weight: {str(e)}"
+
+    # --- 4. RAW SYSTEM / LAB COMMANDS ---
     else:
         print(f"⚡ [SYS] Artoo executing raw system command: '{command}'")
         try:
+            # Handle service restarts
+            if "restart gemma" in command:
+                subprocess.run(["systemctl", "--user", "restart", "gemma.service"], check=True)
+                return "Successfully restarted the Gemma service."
             # Only execute completely safe, read-only or strictly defined lab commands here
-            if command in ["uptime", "date", "whoami", "free -m", "df -h"]:
+            elif command in ["uptime", "date", "whoami", "free -m", "df -h"]:
                 output = subprocess.check_output(command, shell=True, text=True, stderr=subprocess.STDOUT)
                 return f"System Output:\n{output.strip()}"
             else:
