@@ -1,11 +1,23 @@
-# --- v2.1.0 Artoo Execution Tools (Node-Aware Dispatcher) ---
-# Change Message:
-# - v2.1.0: Patched the subprocess Spotify handoff. The target_node variable is now explicitly passed as sys.argv[2] to spotify_control.py, preventing the default "local" override bug. Added subprocess.STDOUT capture so Gemma can read playback errors.
-# - v2.0.0: Refactored dispatcher to support 'target_node' routing for Home Assistant (tinytuya/kasa) and Spotify.
+#!/home/shane/google-labs/gemma_stable_env/bin/python
+# --- v2.1.1 Artoo Execution Tools (Node-Aware Dispatcher) ---
+# CHANGELOG:
+# - v2.1.1: Fixed weight logging crash — added missing `import os` and replaced
+#   fragile __file__-based path resolution with absolute path to weight_tracker.txt.
+#   The weight logging section now reads numeric values from user commands and
+#   appends dated entries to /home/shane/google-labs/memory/weight_tracker.txt.
+#
+# - v2.1.0: Patched the subprocess Spotify handoff. The target_node variable is now
+#   explicitly passed as sys.argv[2] to spotify_control.py, preventing the default
+#   "local" override bug. Added subprocess.STDOUT capture so Gemma can read playback
+#   errors.
+#
+# - v2.0.0: Refactored dispatcher to support 'target_node' routing for Home
+#   Assistant (tinytuya/kasa) and Spotify.
 
 import subprocess
 import json
 import re
+import os
 from datetime import datetime
 
 def local_artoo_executor(command: str, target_node: str = "local") -> str:
@@ -20,7 +32,7 @@ def local_artoo_executor(command: str, target_node: str = "local") -> str:
     if "play" in command or "stop" in command or "pause" in command:
         print(f"⚡ [SYS] Artoo routing Spotify API request to {target_node.upper()}: '{command}'")
         try:
-            # FIX: target_node is now explicitly passed as the third argument
+            # FIX (v2.1.0): target_node is now explicitly passed as the third argument
             output = subprocess.check_output(
                 [
                     "/home/shane/google-labs/gemma_stable_env/bin/python", 
@@ -54,8 +66,9 @@ def local_artoo_executor(command: str, target_node: str = "local") -> str:
                 weight_val = match.group()
                 date_str = datetime.now().strftime("%m/%d/%Y")
                 log_entry = f"{date_str}: {weight_val} lbs"
-                # Updated path to be relative to the memory directory
-                file_path = os.path.join(os.path.dirname(__file__), "memory", "weight_tracker.txt")
+                # FIX (v2.1.1): Use absolute path instead of __file__-based resolution
+                # to avoid path fragility across subprocess contexts.
+                file_path = "/home/shane/google-labs/memory/weight_tracker.txt"
                 with open(file_path, "a") as f:
                     f.write(log_entry + "\n")
                 print(f"⚡ [SYS] Artoo logged weight to {file_path}: {log_entry}")
