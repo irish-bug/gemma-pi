@@ -1,0 +1,12 @@
+[Unit]
+Description=Gemma Spatial Audio Pipe Service
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/gemma_pipes.sh
+Restart=always
+RestartSec=5
+User=shane
+
+[Install]
+WantedBy=multi-user.target
