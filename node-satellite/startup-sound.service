@@ -1,0 +1,15 @@
+[Unit]
+Description=Play Startup Sound
+
+[Service]
+Type=oneshot
+User=shane
+# Plays through ALSA's "default" PCM. Per /etc/asound.conf, default playback
+# is routed through pcm.dmixed -> hw:CARD=Device (the USB audio dongle), NOT
+# the ReSpeaker HAT. No dependency on seeed-voicecard.service: that unit only
+# loads the ReSpeaker's capture driver, which this playback-only service
+# never touches.
+ExecStart=/bin/sh -c 'for i in 1 2 3 4 5; do /usr/bin/aplay -D default /home/shane/audio/excited.wav && exit 0; sleep 1; done; exit 1'
+
+[Install]
+WantedBy=multi-user.target
