@@ -1,37 +1,65 @@
 # .gitignore
-gemma_activity.log
-gemini_activity.log
-gemma_manifest.json
-*.wav
-junk
-old.*
-*.works
-*.broke
-test_*
-hardware_probe.py
-!test_gemma.py
-!test_emotions.py
-workspace-ext/
-node_modules/
-__pycache__/
-Python-3.11.15/
+
+# --- Logs ---
+*.log
+logs/
+session_logs/
+transcripts/
+
+# --- Personal / PII ---
+gemma_manifest.*
+snapshot.json
+
+# --- Credentials & Auth Caches ---
+.cache
+config/
+
+# --- Device Registries (real data — templates only get committed) ---
+devices.json
+
+# --- Sensitive Policy Files (templates live in policies/, real configs do not) ---
+HOME_ASSISTANT.md
+WORKSPACE.md
+INFRASTRUCTURE.md
+
+# --- Memory & RAG (local only, never committed) ---
+memory/
+
+# --- Python Environment & Cache ---
 gemma_stable_env/
 __pycache__/
 *.pyc
 Python-3.11.15/
-gemma_stable_env/
-artoo_ops.log
-*.log
-__pycache__/
-old/
-memory/
-hailo/
-spotify_api/
-HOME_ASSISTANT.md
+
+# --- RAG / Myne Jr build files (local only) ---
 artoo_rag.py
 build_db.py
-ask_artoo.pyartoo_rag.py
 ask_artoo.py
-build_db.py
 hailo/
 spotify_api/
+
+# --- Audio (recordings/scratch only — system sounds are tracked, see exception) ---
+*.wav
+!audio/*.wav
+
+# --- Node / JS ---
+node_modules/
+
+# --- Workspace Extension ---
+workspace-ext/
+
+# --- Scratch / Temp ---
+junk
+old/
+old.*
+*.works
+*.broke
+*.bak
+
+# --- Test files (specific exceptions preserved) ---
+test_*
+!test_gemma.py
+!test_emotions.py
+
+# --- Misc ---
+hardware_probe.py
