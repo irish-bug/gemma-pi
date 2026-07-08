@@ -63,3 +63,4 @@ test_*
 
 # --- Misc ---
 hardware_probe.py
+chroma_db/
