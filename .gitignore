@@ -58,8 +58,10 @@ old.*
 
 # --- Test files (specific exceptions preserved) ---
 test_*
-!test_gemma.py
-!test_emotions.py
+!test_artoo_tools.py
+!test_gemma_tools.py
+!test_spotify_control.py
+!test_gemma_runtime.py
 
 # --- Misc ---
 hardware_probe.py

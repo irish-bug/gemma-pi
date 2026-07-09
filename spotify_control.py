@@ -5,7 +5,53 @@ import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 
 # --- CHANGELOG: spotify_control.py ---
+# Fix 13: Extracted query-parsing/device-matching logic (previously inline in
+#   main()) into top-level pure functions so it's unit-testable without a real
+#   Spotify session -- see test_spotify_control.py. No behavior change.
 # Fix 12: Portability refactor - used relative paths and sys.executable.
+
+COMMAND_PREFIXES = ["tell artoo to play ", "play ", "tell artoo to "]
+
+
+def strip_command_prefix(query: str) -> str:
+    """Strips a leading voice-command prefix (e.g. "play ") off a lowercased
+    query string. Checks each prefix in order against the current value of
+    query, same as the original inline loop -- in practice this strips at
+    most one prefix, since the remaining text rarely starts with another
+    prefix in the list afterward."""
+    for prefix in COMMAND_PREFIXES:
+        if query.startswith(prefix):
+            query = query[len(prefix):].strip()
+    return query
+
+
+def find_device(devices, raw_target: str):
+    """Case-insensitive substring match of raw_target against Spotify Connect
+    device names. Returns (device_id, actual_name), both None on a miss."""
+    for d in devices:
+        if raw_target.lower() in d["name"].lower():
+            return d["id"], d["name"]
+    return None, None
+
+
+def build_album_search_query(query: str) -> str:
+    """Builds a Spotify search query for an album request, e.g.
+    "album abbey road by the beatles" -> "album:abbey road artist:the beatles"."""
+    clean_query = query.replace("album", "").strip()
+    if " by " in clean_query:
+        title, artist = clean_query.split(" by ", 1)
+        return f"album:{title.strip()} artist:{artist.strip()}"
+    return clean_query
+
+
+def build_track_search_query(query: str) -> str:
+    """Builds a Spotify search query for a track request, e.g.
+    "let it be by the beatles" -> "track:let it be artist:the beatles"."""
+    if " by " in query:
+        title, artist = query.split(" by ", 1)
+        return f"track:{title.strip()} artist:{artist.strip()}"
+    return query
+
 
 def load_local_env():
     """Parses .env manually to prevent dependency issues."""
@@ -43,9 +89,7 @@ def main():
     raw_target = sys.argv[2].strip() if len(sys.argv) > 2 else "gemma"
 
     # Clean query prefixes
-    for prefix in ["tell artoo to play ", "play ", "tell artoo to "]:
-        if query.startswith(prefix):
-            query = query[len(prefix):].strip()
+    query = strip_command_prefix(query)
 
     load_local_env()
     
@@ -72,16 +116,8 @@ def main():
 
     # --- THE BRUTE-FORCE DEVICE DISCOVERY ---
     devices = sp.devices().get('devices', [])
-    device_id = None
-    actual_name = None
-    
-    for d in devices:
-        # Case-insensitive substring match
-        if raw_target.lower() in d['name'].lower():
-            device_id = d['id']
-            actual_name = d['name']
-            break
-            
+    device_id, actual_name = find_device(devices, raw_target)
+
     if not device_id:
         available = ", ".join([d['name'] for d in devices])
         print(f"Error: Target '{raw_target}' not found. Available devices: [{available}]")
@@ -106,12 +142,8 @@ def main():
     # Search for the Track or Album
     if "album" in query:
         clean_query = query.replace("album", "").strip()
-        if " by " in clean_query:
-            parts = clean_query.split(" by ", 1)
-            search_q = f"album:{parts[0].strip()} artist:{parts[1].strip()}"
-        else:
-            search_q = clean_query
-            
+        search_q = build_album_search_query(query)
+
         results = sp.search(q=search_q, limit=1, type='album')
         if not results.get('albums', {}).get('items', []):
             results = sp.search(q=clean_query, limit=1, type='album')
@@ -134,12 +166,8 @@ def main():
                 sys.exit(1)
         
     else:
-        if " by " in query:
-            parts = query.split(" by ", 1)
-            search_q = f"track:{parts[0].strip()} artist:{parts[1].strip()}"
-        else:
-            search_q = query
-            
+        search_q = build_track_search_query(query)
+
         results = sp.search(q=search_q, limit=1, type='track')
         if not results.get('tracks', {}).get('items', []):
             results = sp.search(q=query, limit=1, type='track')

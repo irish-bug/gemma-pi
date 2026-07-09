@@ -20,13 +20,15 @@ setup:
 	@chmod +x .git/hooks/pre-commit
 	@echo "Setup complete. Core environment is secured."
 
-# Verification Layer (Bypasses nuked test files to prevent compiler blocks)
+# Verification Layer: syntax check + real unit test suite (test_*.py) on this
+# repo's own code (previously py_compiled google-labs' copies by mistake --
+# that never actually verified anything committed to this repo).
 test:
 	@echo "Verifying local code syntax baseline..."
-	@$(PYTHON) -m py_compile /home/shane/google-labs/gemma_runtime.py
-	@$(PYTHON) -m py_compile /home/shane/google-labs/artoo_tools.py
-	@$(PYTHON) -m py_compile /home/shane/google-labs/spotify_control.py
-	@echo " [SUCCESS] Core scripts are structurally sound."
+	@$(PYTHON) -m py_compile gemma_runtime.py artoo_tools.py gemma_tools.py spotify_control.py
+	@echo "Running unit test suite..."
+	@$(PYTHON) -m unittest discover -s . -p "test_*.py" -v
+	@echo " [SUCCESS] Core scripts are structurally sound and unit tests pass."
 
 # Launch the Primary Live Voice Engine
 run:

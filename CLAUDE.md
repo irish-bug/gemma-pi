@@ -55,18 +55,39 @@ personal data does not belong in this repo.
 
 ## Commands
 
-There is no automated test suite — `make test` is a syntax check
-(`py_compile`) on the core runtime files, not behavioral verification. There is
-no linter config.
+`make test` runs a `py_compile` syntax check on the core runtime files, then
+the real `unittest` suite (`test_*.py`, stdlib `unittest`/`unittest.mock`
+only — no pytest, no extra deps). There is no linter config.
 
 ```bash
 make setup   # installs Python deps into a local venv and a git pre-commit hook
              # that runs `make test`
-make test    # py_compile on gemma_runtime.py, artoo_tools.py, spotify_control.py
+make test    # py_compile + python -m unittest discover -s . -p "test_*.py"
 make run     # launches the voice runtime (gemma_runtime.py)
 make commit  # test -> git add -> commit -> push
 make clean   # rm -rf __pycache__ .pytest_cache
 ```
+
+Run a single test file directly: `python3 -m unittest test_artoo_tools -v`.
+
+Commits in this repo require passing tests, not just a clean syntax check —
+if you're changing a module that isn't covered yet, add coverage before
+committing rather than relying on `py_compile` alone.
+
+Tests live at the repo root (`test_artoo_tools.py`, `test_gemma_tools.py`,
+`test_spotify_control.py`, `test_gemma_runtime.py`) rather than under
+`node-*/`, since the modules they cover are themselves still at the root (see
+"Some files not yet reorganized" above). `.gitignore`'s blanket `test_*`
+pattern requires a matching `!test_whatever.py` exception for each new test
+file, or it silently won't be tracked — check that file when adding one.
+
+Note that `gemma_runtime.py`, `artoo_tools.py`, and `spotify_control.py` were
+each given a small extract-function refactor to make their core logic
+testable without real hardware/network access (wake-word gating math pulled
+out of `main()`'s nested closures; Spotify query-parsing/device-matching
+pulled out of `main()`). These were behavior-preserving refactors done
+specifically to enable testing, not incidental cleanup — see each file's
+changelog header for what moved and why.
 
 The `Makefile`'s `ENV_DIR` and the shebang line on most scripts hardcode an
 absolute path to a specific machine's venv — update those for your own
