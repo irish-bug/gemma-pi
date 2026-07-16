@@ -35,7 +35,9 @@ repo root (`gemma_runtime.py`, `artoo_tools.py`, `gemma_tools.py`,
 `spotify_control.py`, `light_control.py`, etc.) — check `node-artoo/` first for
 whichever of these you're editing, since a newer copy may already exist there
 independent of the root one; `git log -- <path>` is the fastest way to tell
-which is current.
+which is current. This isn't just a documentation nuisance: `node-artoo/`'s
+copies are what's actually symlinked into production on the physical node —
+see "Deploying to node-artoo" below.
 
 ## Public/private split
 
@@ -57,6 +59,39 @@ see `policies/HOME_ASSISTANT_TEMPLATE.md` next to the (gitignored)
 Before adding a new file here, check whether it belongs in this list or should
 be `.gitignore`d instead — anything with a real IP, device ID, credential, or
 personal data does not belong in this repo.
+
+## Deploying to node-artoo
+
+The physical `artoo` Pi's actual runtime directory is `/home/shane/google-labs/`
+— a private, non-git working directory, not a checkout of this repo. It gets
+code from this repo two different ways, and they need different deploy steps:
+
+- `artoo_tools.py`, `spotify_control.py`, and `AGENTS.md` are symlinked from
+  `google-labs/` into *this repo's `node-artoo/` subdirectory* — not into the
+  root-level duplicates of the same filenames. Editing the root copy of
+  `artoo_tools.py` does nothing for the running service until `node-artoo/
+  artoo_tools.py` is updated to match it. This isn't hypothetical:
+  `node-artoo/artoo_tools.py` sat frozen at its initial monorepo-import
+  content while the root file went through several more version bumps, so
+  `google-labs/artoo_tools.py` was silently serving stale dispatcher logic
+  the whole time. Always sync the `node-artoo/` copy (`cp` + commit) as part
+  of deploying a change to one of these three files.
+- `gemma_runtime.py` isn't symlinked at all — `google-labs/gemma_runtime.py`
+  is a plain file that must be manually `cp`'d over after every change to the
+  root copy, or the running service keeps executing whatever was last copied
+  in, regardless of what's on `main`.
+
+There's no deploy script. After copying the current files into place, restart
+with `systemctl --user restart artoo.service` and/or `gemma.service` (both are
+user-level systemd units — no `sudo`, and no system-level journald log; check
+`google-labs/gemma_activity.log` for runtime output instead of `journalctl`).
+
+`config/nodes.json`'s `myne` key controls whether the Myne-cache check in
+`escalate_with_cache` can reach anything; without it, `_myne_url()` returns
+`None` and every escalation falls straight through to Artoo. That's the
+designed degraded-mode behavior, not a bug — but it means "no config yet" and
+"caching is broken" look identical from the logs, so check for the file
+before assuming the latter.
 
 ## Commands
 

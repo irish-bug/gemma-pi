@@ -46,12 +46,15 @@ dedicated NPU node instead of just calling the cloud for everything:
   doesn't grow unbounded; `core`/`reference` are hand-curated and exempt from
   eviction by design.
 
-**Status:** wired end to end. Anything `artoo_tools.py`'s dispatcher can't
-resolve as simple device control (Spotify, lights, weight logging) now checks
-Myne's `POST /query` first; on a miss it escalates to the real Artoo reasoning
-agent (a one-shot, non-interactive `agy --print` call — not a hardcoded
-Python router pretending to be one) and writes the answer back via
-`POST /learn` so the same question is a local hit next time.
+**Status:** wired end to end and deployed to `node-artoo`. Anything
+`artoo_tools.py`'s dispatcher can't resolve as simple device control (Spotify,
+lights, weight logging) now checks Myne's `POST /query` first; on a miss it
+escalates to the real Artoo reasoning agent (a one-shot, non-interactive
+`agy --print` call — not a hardcoded Python router pretending to be one) and
+writes the answer back via `POST /learn` so the same question is a local hit
+next time. On `node-artoo` today, `config/nodes.json` has no `myne` entry yet,
+so the cache check is a no-op and every escalation goes straight to Artoo —
+correct fallback behavior, just not yet getting the caching benefit.
 
 ## Repo layout & the public/private split
 
@@ -69,7 +72,11 @@ is missing those paths on purpose (`memory/`, real `policies/*.md`, `config/`,
   `spotify_control.py`, `light_control.py`, etc.) haven't been moved into a
   `node-*/` subdirectory yet and still live at the repo root — check
   `git log -- <path>` before assuming which copy (root vs. `node-artoo/`) is
-  current.
+  current. This matters beyond tidiness: on the physical `artoo` node,
+  `artoo_tools.py`/`spotify_control.py`/`AGENTS.md` are symlinked from the
+  private runtime directory into `node-artoo/`'s copies specifically, so a
+  root-only edit doesn't reach production until `node-artoo/`'s duplicate is
+  synced too — see CLAUDE.md's "Deploying to node-artoo".
 - Where a private file needs a sanitized public counterpart, the pattern is a
   `*_TEMPLATE.md` with placeholder values (see `policies/HOME_ASSISTANT_TEMPLATE.md`).
 
