@@ -4,22 +4,27 @@ A multi-node home voice assistant: wake-word-triggered, low-latency voice I/O
 over the Gemini Multimodal Live API, backed by a local reasoning agent with
 shell/tool access, and a local semantic cache that exists specifically to cut
 cloud token spend and latency on repeat queries. It's not a single Raspberry
-Pi running one script — it's three Pis, each doing one job well, talking to
+Pi running one script — it's several Pis, each doing one job well, talking to
 each other over TCP/link-local Ethernet.
 
-## Architecture: three nodes, three jobs
+## Architecture: three jobs, four physical nodes
 
 | Node | Hardware | Job |
 | :--- | :--- | :--- |
 | **artoo** | Pi 5, physical display | Voice I/O (wake word → Gemini Live API → TTS) *and* a separate CLI reasoning agent (shell + Google Workspace access) that voice hands off to for anything beyond simple device control |
 | **myne** | Pi 5 + AI HAT+ Pro 2 (Hailo-10H NPU) | Local RAG/inference only — no reasoning agent, no voice I/O, no display |
-| **satellite** ("satellite-of-love", the shed) | Pi Zero 2W | Mic-only Wyoming-protocol audio relay — no reasoning, no local model |
+| **satellite** ("satellite-of-love", the shed) | Pi Zero 2W | Mic-only TCP audio relay — no reasoning, no local model |
+| **sputnik** | Pi Zero 2W | A second, independent instance of the same mic-only audio relay role as satellite, different room |
 
 The voice runtime and the reasoning agent live on the same physical node
 (`artoo`) but are architecturally independent processes with different jobs —
 don't conflate "the thing that hears you" with "the thing that decides what to
 do about it." See `node-artoo/AGENTS.md` for the reasoning agent's actual
-persona/protocol.
+persona/protocol. Both remote audio-relay nodes run the identical
+`node-satellite/` service files; `gemma_runtime.py` finds each one's real
+address at runtime from the gitignored `config/nodes.json` rather than having
+it hardcoded, and simply runs without a given node's listener if that node
+isn't present in the local config yet.
 
 ## Agentic caching & token optimization (ongoing)
 
@@ -41,12 +46,12 @@ dedicated NPU node instead of just calling the cloud for everything:
   doesn't grow unbounded; `core`/`reference` are hand-curated and exempt from
   eviction by design.
 
-**Status:** the cache service itself is implemented and covered by design
-notes in its own source, but whether the reasoning agent's dispatcher
-(`artoo_tools.py`) actually calls `/query`/`/learn` end-to-end in production
-is not yet confirmed — that wiring is the next piece of this work, not a
-finished feature. Don't assume the loop is closed just because both halves
-exist.
+**Status:** wired end to end. Anything `artoo_tools.py`'s dispatcher can't
+resolve as simple device control (Spotify, lights, weight logging) now checks
+Myne's `POST /query` first; on a miss it escalates to the real Artoo reasoning
+agent (a one-shot, non-interactive `agy --print` call — not a hardcoded
+Python router pretending to be one) and writes the answer back via
+`POST /learn` so the same question is a local hit next time.
 
 ## Repo layout & the public/private split
 
@@ -72,7 +77,7 @@ is missing those paths on purpose (`memory/`, real `policies/*.md`, `config/`,
 
 - **Compute (artoo & myne):** Raspberry Pi 5 (8GB)
 - **Accelerator (myne only):** Raspberry Pi AI HAT+ Pro 2 (Hailo-10H)
-- **Satellite:** Raspberry Pi Zero 2W + ReSpeaker 2-Mic HAT
+- **Satellite nodes (satellite-of-love, sputnik):** Raspberry Pi Zero 2W + ReSpeaker 2-Mic HAT
 - **Audio (artoo):** Anker PowerConf S500
 
 ## Usage

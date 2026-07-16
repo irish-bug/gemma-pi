@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 A monorepo for a multi-node home voice-assistant project: a wake-word-triggered
 voice runtime backed by the Gemini Live API, a local command dispatcher, and an
 optional local RAG cache service that sits between the dispatcher and the cloud.
-It's split across three physically separate machines, each with its own
-subdirectory:
+It's split across physically separate machines, each node role with its own
+subdirectory (one role, `node-satellite/`, is currently deployed to more than
+one physical machine — see below):
 
 - **`node-artoo/`** — the voice runtime + reasoning-agent node. Two things live
   here that share hardware but are architecturally separate: a real-time voice
@@ -23,7 +24,11 @@ subdirectory:
   `reference` / `learned_cache`) and the reasoning behind the distance
   threshold and chunking choices — those comments are the actual spec.
 - **`node-satellite/`** — a mic-only audio relay node (no reasoning, no local
-  model) that streams audio to/from the artoo node over TCP.
+  model) that streams audio to/from the artoo node over TCP. These service
+  files are deployed identically to two physical Pis today (satellite-of-love
+  and sputnik); `gemma_runtime.py` on the artoo node opens one listener per
+  node listed in the gitignored `config/nodes.json`, not a hardcoded single
+  address, so adding another one is a config change, not a code change.
 
 Some files not yet reorganized into a `node-*/` subdirectory still live at the
 repo root (`gemma_runtime.py`, `artoo_tools.py`, `gemma_tools.py`,
@@ -106,13 +111,19 @@ local plain-text command router (`artoo_tools.py`) rather than structured
 function args, so the model is prompted to emit plain commands
 (`"play album abbey road"`), not pseudo-code.
 
-The router pattern-matches the command string to decide: direct local
-execution (device control, safelisted shell commands), a subprocess call out
-to a dedicated script (e.g. `spotify_control.py`), or — for anything needing
-real knowledge rather than device control — a check against the local RAG
-cache service (`node-myne/`) before falling back to a cloud model call. A
-cloud fallback's answer is written back into the cache (`/learn`) so repeat
-questions resolve locally.
+The router pattern-matches the command string to decide: direct local device
+control (Spotify via a subprocess call out to `spotify_control.py`, Home
+Assistant, weight logging), or — for anything needing real knowledge rather
+than device control — a check against the local RAG cache service
+(`node-myne/`) before escalating to the real Artoo reasoning agent (a
+one-shot, non-interactive `agy --print` call with `--dangerously-skip-permissions`,
+run from the reasoning agent's workspace root so it picks up its own
+`AGENTS.md` — see `artoo_tools.py`'s `escalate_to_artoo`). There's no
+hardcoded shell safelist anymore: anything the router doesn't recognize as
+device control gets full agentic shell access via Artoo, not a rejection —
+that's an intentional widening of blast radius from voice input, matching how
+`artoo.service` already runs its interactive session. Artoo's answer is
+written back into the cache (`/learn`) so repeat questions resolve locally.
 
 If you're touching the dispatcher or the RAG service, read the module-level
 comments in `node-myne/rag_service.py` and `node-myne/rag_store.py` first —

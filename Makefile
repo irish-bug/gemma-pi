@@ -13,7 +13,7 @@ PIP     = $(ENV_DIR)/bin/pip
 # Initial Setup & Git Guard Rails
 setup:
 	@echo "Installing stable infrastructure dependencies..."
-	@$(PIP) install pyalsaaudio numpy websockets sounddevice openwakeword spotipy google-genai
+	@$(PIP) install pyalsaaudio numpy websockets sounddevice openwakeword spotipy google-genai requests
 	@echo "Installing Git hooks..."
 	@mkdir -p .git/hooks
 	@printf '#!/bin/bash\necho " [CI/CD] Running Pre-Commit Verifications..."\nmake test\nif [ $$? -ne 0 ]; then\n    echo " [ERROR] Environment checks failed. Commit aborted."\n    exit 1\nfi\necho " [SUCCESS] System clean. Proceeding with commit."\n' > .git/hooks/pre-commit
